@@ -13,7 +13,6 @@ Browse human genome results at [dsrna.chpc.utah.edu](http://dsrna.chpc.utah.edu)
 
 ```bash
 pip install dsrnascan
-# No EMBOSS installation required - einverted binary is included
 ```
 
 **Platforms:** Linux (Python 3.8+), macOS (Python 3.9+). Windows not supported (use WSL).
