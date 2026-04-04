@@ -673,6 +673,10 @@ class DSRNARequestHandler(SimpleHTTPRequestHandler):
                 r['stability_model_score'] = _safe_val(row['stability_model_score'], float, None)
             if 'probing_model_score' in row:
                 r['probing_model_score'] = _safe_val(row['probing_model_score'], float, None)
+            if 'likely_edited' in row:
+                r['likely_edited'] = str(row['likely_edited']).strip().lower() == 'yes'
+            if 'likely_forms' in row:
+                r['likely_forms'] = str(row['likely_forms']).strip().lower() == 'yes'
             results.append(r)
 
         self._send_json({
@@ -906,8 +910,14 @@ function showInfo(d) {
         <div><span class="metric-label">Base Pairs:</span> <span class="metric-value">${d.base_pairs} (${d.percent_paired.toFixed(1)}%)</span></div>
         <div><span class="metric-label">Helix:</span> <span class="metric-value">${d.longest_helix} bp</span></div>
         <div><span class="metric-label">Span:</span> <span class="metric-value">${span.toLocaleString()} bp</span></div>`;
-    if (d.stability_model_score != null) html += `<div><span class="metric-label">Stability:</span> <span class="metric-value">${d.stability_model_score.toFixed(3)}</span></div>`;
-    if (d.probing_model_score != null) html += `<div><span class="metric-label">Probing:</span> <span class="metric-value">${d.probing_model_score.toFixed(3)}</span></div>`;
+    if (d.stability_model_score != null) {
+        const editBadge = d.likely_edited ? ' <span style="background:#27ae60;color:#fff;padding:1px 6px;border-radius:3px;font-size:11px;">Likely Edited</span>' : '';
+        html += `<div><span class="metric-label">Stability:</span> <span class="metric-value">${d.stability_model_score.toFixed(3)}</span>${editBadge}</div>`;
+    }
+    if (d.probing_model_score != null) {
+        const formBadge = d.likely_forms ? ' <span style="background:#2980b9;color:#fff;padding:1px 6px;border-radius:3px;font-size:11px;">Likely Forms</span>' : '';
+        html += `<div><span class="metric-label">Probing:</span> <span class="metric-value">${d.probing_model_score.toFixed(3)}</span>${formBadge}</div>`;
+    }
     if (d.editing_sites && d.editing_sites.length > 0) html += `<div><span class="metric-label" style="color:#27AE60">Editing Sites:</span> <span class="metric-value">${d.editing_sites.length}</span></div>`;
     document.getElementById('metrics').innerHTML = html;
 
@@ -916,13 +926,19 @@ function showInfo(d) {
     if (d.i_seq && d.j_seq) {
         const parts = d.structure ? d.structure.split('&') : ['',''];
         const btnStyle = 'font-size:11px; padding:2px 8px; cursor:pointer; margin-left:6px; border:1px solid #ccc; border-radius:3px; background:#fff;';
+        const dbnHeader = `>${d.id} ${d.location} dG=${d.energy}`;
+        const dbnSeq = d.i_seq + 'N' + d.j_seq;
+        const dbnStr = parts[0] + '.' + parts[1];
+        const dbnFull = dbnHeader + '\\n' + dbnSeq + '\\n' + dbnStr;
         seqPanel.style.display = 'block';
         seqPanel.innerHTML = `
             <span style="font-family:sans-serif; font-size:12px; color:#666;"><strong>Copy:</strong></span>
+            <button onclick="copyText('dbn-full',this)" style="${btnStyle}">DBN</button>
             <button onclick="copyText('seq-i',this)" style="${btnStyle}">i-seq (${d.i_seq.length} nt)</button>
             <button onclick="copyText('str-i',this)" style="${btnStyle}">i-struct</button>
             <button onclick="copyText('seq-j',this)" style="${btnStyle}">j-seq (${d.j_seq.length} nt)</button>
             <button onclick="copyText('str-j',this)" style="${btnStyle}">j-struct</button>
+            <span id="dbn-full" style="display:none;">${dbnFull}</span>
             <span id="seq-i" style="display:none;">${d.i_seq}</span>
             <span id="str-i" style="display:none;">${parts[0]}</span>
             <span id="seq-j" style="display:none;">${d.j_seq}</span>

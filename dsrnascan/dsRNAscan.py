@@ -4,7 +4,7 @@ dsRNAscan - A tool for genome-wide prediction of double-stranded RNA structures
 Copyright (C) 2024 Bass Lab
 """
 
-__version__ = '0.4.9'
+__version__ = '0.5.0'
 __author__ = 'Bass Lab'
 
 import os
@@ -312,16 +312,16 @@ def generate_bedpe_file(input_file, output_file):
     print(f"Successfully wrote BEDPE file to {output_file}")
 
 
-def generate_bp_file(input_file, output_file):
+def generate_bp_file(input_file, output_file, strand_filter=None):
     """
     Generate a BP file from the merged dsRNA results file using the correct format for IGV.
-    Uses strand information and percent_paired for color coding.
-    
+    Uses percent_paired for color coding.
+
     Args:
         input_file (str): Path to the merged results file
         output_file (str): Path to the output BP file
+        strand_filter (str): If set, only include this strand ('+' or '-')
     """
-    print(f"Reading data from {input_file}")
     
     try:
         # Check if the file exists and is not empty
@@ -345,11 +345,13 @@ def generate_bp_file(input_file, output_file):
             
         # Check if DataFrame is empty
         if df.empty:
-            print(f"Warning: No data found in {input_file}")
             return
-        
-        # Print the column names for debugging
-        print(f"Columns in file: {', '.join(df.columns)}")
+
+        # Filter by strand if requested
+        if strand_filter and 'Strand' in df.columns:
+            df = df[df['Strand'] == strand_filter]
+            if df.empty:
+                return
         
         # Verify required columns exist
         required_cols = ["Chromosome", "i_start", "i_end", "j_start", "j_end", "percent_paired"]
@@ -1869,8 +1871,10 @@ def run_dataframe_approach(args):
 
     # Generate output files
     if not results.empty:
-        bp_file = output_file.replace('.txt', '.bp')
-        generate_bp_file(output_file, bp_file)
+        bp_forward = output_file.replace('.txt', '.forward.bp')
+        bp_reverse = output_file.replace('.txt', '.reverse.bp')
+        generate_bp_file(output_file, bp_forward, strand_filter='+')
+        generate_bp_file(output_file, bp_reverse, strand_filter='-')
         gff3_file = output_file.replace('.txt', '.gff3')
         generate_gff3_file(output_file, gff3_file)
         bedpe_file = output_file.replace('.txt', '.bedpe')
@@ -1889,7 +1893,7 @@ def main():
                         help='input filename')
     parser.add_argument('-t', type=int, default=37,
                         help='Folding temperature in celsius; default = 37C')
-    parser.add_argument('-s', '--step', type=int, default=150,
+    parser.add_argument('-s', '--step', type=int, default=500,
                         help='Step size; default = 150')
     parser.add_argument('-w', type=int, default=10000,
                         help='Window size; default = 10000')

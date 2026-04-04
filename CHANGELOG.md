@@ -2,6 +2,26 @@
 
 All notable changes to dsRNAscan will be documented in this file.
 
+## [0.5.0] - 2026-04-04
+
+### Added
+- GFF3 and BEDPE output files generated automatically
+- `likely_edited` and `likely_forms` columns based on ML model Youden thresholds
+- DBN copy button in dsrna-browse for quick structure export
+- Confidence badges in dsrna-browse (green "Likely Edited", blue "Likely Forms")
+- BP files split by strand (forward.bp and reverse.bp) for cleaner IGV visualization
+
+### Changed
+- Default step size increased from 150 to 500 (20x window overlap, 3x faster scans)
+- Renamed ML columns: `stability_score` to `stability_model_score`, `probing_score` to `probing_model_score`
+- Corrected stability model Youden threshold to 0.2471
+- ydf and scikit-learn are now required dependencies
+- Overlap analyzer reads dsRNAscan TSV output directly, vectorized BED creation
+
+### Fixed
+- Sequences shorter than window size now create one full-length window
+- Removed hardcoded paths from overlap analyzer
+
 ## [0.4.8] - 2026-04-04
 
 ### Added
