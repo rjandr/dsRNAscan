@@ -669,10 +669,10 @@ class DSRNARequestHandler(SimpleHTTPRequestHandler):
                 'i_len': len(str(row['i_seq'])) if pd.notna(row.get('i_seq')) else 0,
                 'j_len': len(str(row['j_seq'])) if pd.notna(row.get('j_seq')) else 0,
             }
-            if 'stability_score' in row:
-                r['stability_score'] = _safe_val(row['stability_score'], float, None)
-            if 'probing_score' in row:
-                r['probing_score'] = _safe_val(row['probing_score'], float, None)
+            if 'stability_model_score' in row:
+                r['stability_model_score'] = _safe_val(row['stability_model_score'], float, None)
+            if 'probing_model_score' in row:
+                r['probing_model_score'] = _safe_val(row['probing_model_score'], float, None)
             results.append(r)
 
         self._send_json({
@@ -713,7 +713,7 @@ class DSRNARequestHandler(SimpleHTTPRequestHandler):
                 result[col] = int(row[col])
 
         # Add ML scores
-        for col in ['stability_score', 'probing_score']:
+        for col in ['stability_model_score', 'probing_model_score']:
             if col in row and pd.notna(row[col]):
                 result[col] = float(row[col])
 
@@ -906,8 +906,8 @@ function showInfo(d) {
         <div><span class="metric-label">Base Pairs:</span> <span class="metric-value">${d.base_pairs} (${d.percent_paired.toFixed(1)}%)</span></div>
         <div><span class="metric-label">Helix:</span> <span class="metric-value">${d.longest_helix} bp</span></div>
         <div><span class="metric-label">Span:</span> <span class="metric-value">${span.toLocaleString()} bp</span></div>`;
-    if (d.stability_score != null) html += `<div><span class="metric-label">Stability:</span> <span class="metric-value">${d.stability_score.toFixed(3)}</span></div>`;
-    if (d.probing_score != null) html += `<div><span class="metric-label">Probing:</span> <span class="metric-value">${d.probing_score.toFixed(3)}</span></div>`;
+    if (d.stability_model_score != null) html += `<div><span class="metric-label">Stability:</span> <span class="metric-value">${d.stability_model_score.toFixed(3)}</span></div>`;
+    if (d.probing_model_score != null) html += `<div><span class="metric-label">Probing:</span> <span class="metric-value">${d.probing_model_score.toFixed(3)}</span></div>`;
     if (d.editing_sites && d.editing_sites.length > 0) html += `<div><span class="metric-label" style="color:#27AE60">Editing Sites:</span> <span class="metric-value">${d.editing_sites.length}</span></div>`;
     document.getElementById('metrics').innerHTML = html;
 

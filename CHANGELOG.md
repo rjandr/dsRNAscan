@@ -2,6 +2,21 @@
 
 All notable changes to dsRNAscan will be documented in this file.
 
+## [0.4.8] - 2026-04-04
+
+### Added
+- GFF3 and BEDPE output formats generated automatically
+- `likely_edited` and `likely_forms` categorical columns based on ML model thresholds
+- ML models bundled in package (`dsrnascan/models/`)
+- ydf and scikit-learn now required dependencies (no longer optional)
+- Overlap analyzer supports dsRNAscan TSV output directly (not just parquet)
+
+### Changed
+- Renamed ML columns: `stability_score` to `stability_model_score`, `probing_score` to `probing_model_score`
+- Corrected stability model Youden threshold (0.2471)
+- Overlap analyzer: vectorized BED creation, removed hardcoded paths
+- Removed `conda-recipe/`, `test_data/`, and einverted source files from repo
+
 ## [0.4.7] - 2026-04-04
 
 ### Added

@@ -1,53 +1,9 @@
-# Essential files for package
 include README.md
 include LICENSE
 include requirements.txt
+recursive-include dsrnascan/tools *
+recursive-include dsrnascan/models *
 
-# Files needed for einverted compilation
-include einverted.patch
-include compile_patched_einverted.sh
-
-# Include the einverted binary (platform-specific wheels include the right one)
-include dsrnascan/tools/einverted
-recursive-include dsrnascan/tools/platform_binaries *
-
-# Exclude unnecessary files
-prune overlap_analyzer
-prune conda-recipe
-prune test_data
-prune docker-test
-prune .github
-exclude compile_einverted_windows.bat
-exclude compile_einverted_windows.sh
-exclude einverted.c
-exclude *.dsRNApredictions.bp
-exclude *_merged_results.txt
-exclude *_ein_results.txt
-exclude test_*.fa
-exclude test_*.fasta
-exclude *.parquet
-exclude *.html
-exclude Dockerfile*
-exclude tox.ini
-exclude setup.cfg
-exclude .gitignore
-exclude .gitattributes
-exclude build_*.sh
-exclude upload_*.sh
-exclude test_*.sh
-exclude test_*.py
-exclude benchmark_*.py
-exclude analyze_*.py
-exclude validate_*.py
-exclude visualize_*.py
-exclude *_test.py
-exclude CLAUDE.md
-exclude *.bak
-exclude *.backup
-
-# Global exclusions
 global-exclude *.pyc
 global-exclude __pycache__
 global-exclude .DS_Store
-global-exclude *.swp
-global-exclude *~

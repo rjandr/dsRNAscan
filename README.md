@@ -19,8 +19,6 @@ pip install dsrnascan
 
 **Dependencies** (auto-installed): biopython, numpy, pandas, ViennaRNA
 
-**Optional** (for ML scoring): `pip install dsrnascan[scoring]`
-
 If ViennaRNA fails via pip, install with conda: `conda install -c bioconda viennarna`
 
 ## Usage
@@ -70,9 +68,13 @@ Results are written to the output directory:
 - **Coordinates:** Chromosome, Strand, i_start, i_end, j_start, j_end
 - **einverted:** Score, RawMatch, PercMatch, Gaps
 - **RNAduplex:** dG(kcal/mol), base_pairs, percent_paired, longest_helix, eff_i/j_start/end, i_seq, j_seq, structure
-- **ML scores** (if enabled): stability_score, probing_score
+- **ML scores:** stability_model_score, probing_model_score, likely_edited (Yes/No), likely_forms (Yes/No)
 
-**`*.dsRNApredictions.bp`** - IGV-compatible visualization file
+**`*.bp`** - IGV arc visualization file
+
+**`*.gff3`** - GFF3 with mRNA/exon types so IGV renders the loop between arms as a thin connecting line
+
+**`*.bedpe`** - BEDPE format with paired coordinates (one line per dsRNA)
 
 ## Browse Results
 

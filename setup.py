@@ -4,7 +4,7 @@ import platform
 from setuptools import setup, find_packages
 
 # Version information
-__version__ = '0.4.7'
+__version__ = '0.4.8'
 
 def get_platform_binary():
     """Determine which pre-compiled einverted binary to use"""
@@ -122,9 +122,10 @@ setup(
         'ViennaRNA>=2.4',
         'psutil>=5.8',
         'tqdm>=4.0',
+        'ydf>=0.9.0',
+        'scikit-learn>=1.0',
     ],
     extras_require={
-        'scoring': ['ydf>=0.9.0', 'scikit-learn>=1.0'],
         'mpi': ['mpi4py>=3.0', 'parasail>=1.2'],
         'dev': [
             'pytest>=6.0',

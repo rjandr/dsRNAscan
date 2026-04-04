@@ -155,170 +155,231 @@ class GFF3Parser(InputParser):
 class dsRNADataLoader:
     """Handles loading and filtering of dsRNA data"""
     
+    # Column name mappings: dsRNAscan TSV output -> internal names
+    COLUMN_MAP_TSV = {
+        'Chromosome': 'chr', 'Strand': 'strand',
+        'i_start': 'i_start', 'i_end': 'i_end',
+        'j_start': 'j_start', 'j_end': 'j_end',
+        'eff_i_start': 'eff_i_start', 'eff_i_end': 'eff_i_end',
+        'eff_j_start': 'eff_j_start', 'eff_j_end': 'eff_j_end',
+        'stability_model_score': 'stability_model_score', 'probing_model_score': 'probing_model_score',
+    }
+    # Column name mappings: legacy parquet format -> internal names
+    COLUMN_MAP_PARQUET = {
+        'er_chr': 'chr', 'er_strand': 'strand',
+        'er_i_start': 'i_start', 'er_i_end': 'i_end',
+        'er_j_start': 'j_start', 'er_j_end': 'j_end',
+    }
+
     def __init__(self, dsrna_file: Optional[str] = None):
-        """Initialize with dsRNA data file"""
-        # Default to data directory in repo, then fall back to your local file
+        """Initialize with dsRNA data file (TSV from dsRNAscan or parquet)"""
         if dsrna_file:
             self.dsrna_file = dsrna_file
         else:
-            # Try multiple locations
+            # Try standard locations
             possible_paths = [
-                # In overlap_analyzer/data directory
                 "data/dsrna_predictions.parquet",
-                
-                # Common dsRNAscan output locations (when in subfolder)
-                "../dsRNAscan_output/predictions.parquet",
-                "../output/dsrna_predictions.parquet",
-                
-                # Your local file (for development)
-                "/Users/ryanandrews/Bioinformatics/20250619.df_with_normalized_predictions.parquet",
-                
-                # Environment variable override
                 os.environ.get("DSRNA_DATA_PATH", ""),
-                
-                # Current directory (if run from dsRNAscan output dir)
-                "dsrna_predictions.parquet",
-                "predictions.parquet"
             ]
-            
-            # Filter out empty strings and check each path
             possible_paths = [p for p in possible_paths if p]
-            
+
             for path in possible_paths:
                 if os.path.exists(path):
                     self.dsrna_file = path
                     break
             else:
                 raise FileNotFoundError(
-                    "dsRNA data file not found. Please either:\n"
-                    "1. Clone the repository with Git LFS enabled\n"
-                    "2. Provide your own file with --dsrna-file\n"
-                    "3. Place the parquet file in the 'data' directory"
+                    "dsRNA data file not found. Provide with --dsrna-file or\n"
+                    "set DSRNA_DATA_PATH environment variable."
                 )
-        
+
         self.df = None
         self.available_subsets = {}
+        self.file_format = None  # 'tsv' or 'parquet'
         
     def load_data(self, columns: Optional[List[str]] = None):
-        """Load dsRNA data with specified columns"""
+        """Load dsRNA data from TSV (dsRNAscan output) or parquet format.
+
+        Automatically detects format and normalizes column names.
+        """
+        ext = Path(self.dsrna_file).suffix.lower()
+
+        if ext in ['.tsv', '.txt', '.csv']:
+            self._load_tsv()
+        elif ext == '.parquet':
+            self._load_parquet(columns)
+        else:
+            # Try TSV first (dsRNAscan output), fall back to parquet
+            try:
+                self._load_tsv()
+            except Exception:
+                self._load_parquet(columns)
+
+        logger.info(f"Loaded {len(self.df):,} dsRNA regions from {self.file_format} file")
+        self._define_subsets()
+
+    def _load_tsv(self):
+        """Load dsRNAscan TSV output and normalize columns"""
+        sep = '\t'
+        if self.dsrna_file.endswith('.csv'):
+            sep = ','
+        self.df = pd.read_csv(self.dsrna_file, sep=sep)
+        self.file_format = 'tsv'
+
+        # Rename columns to internal names
+        rename = {k: v for k, v in self.COLUMN_MAP_TSV.items() if k in self.df.columns}
+        self.df = self.df.rename(columns=rename)
+
+        self.has_structure_probing = 'probing_model_score' in self.df.columns
+
+    def _load_parquet(self, columns=None):
+        """Load legacy parquet format and normalize columns"""
         if columns is None:
-            columns = ['er_chr', 'er_i_start', 'er_i_end', 'er_j_start', 'er_j_end', 
-                      'er_strand', 'alu', 'i_phast17', 'j_phast17', 'i_phast100', 'j_phast100',
-                      'pred_prob_editing_structure_only_alu100pct', 
-                      'pred_prob_editing_gtex_alu100pct']
-        
-        # Try to load with different column options
+            columns = ['er_chr', 'er_i_start', 'er_i_end', 'er_j_start', 'er_j_end',
+                       'er_strand']
+
+        # Try loading with optional columns
+        optional_cols = ['alu', 'i_phast17', 'j_phast17', 'i_phast100', 'j_phast100',
+                        'pred_prob_editing_structure_only_alu100pct',
+                        'pred_prob_editing_gtex_alu100pct',
+                        'pred_3utr_normalized',
+                        'pred_3utr_All_power_weighted_advantage']
+
+        # Load with whatever columns exist
+        all_cols = columns + optional_cols
         try:
-            self.df = pd.read_parquet(self.dsrna_file, columns=columns + ['pred_3utr_normalized'])
+            self.df = pd.read_parquet(self.dsrna_file, columns=all_cols)
+        except Exception:
+            # Fall back to just the required columns
+            available = pd.read_parquet(self.dsrna_file, columns=None).columns.tolist()
+            load_cols = [c for c in all_cols if c in available]
+            self.df = pd.read_parquet(self.dsrna_file, columns=load_cols)
+
+        self.file_format = 'parquet'
+
+        # Rename columns to internal names
+        rename = {k: v for k, v in self.COLUMN_MAP_PARQUET.items() if k in self.df.columns}
+        self.df = self.df.rename(columns=rename)
+
+        # Detect structure probing column
+        if 'pred_3utr_normalized' in self.df.columns:
             self.has_structure_probing = True
             self.structure_probing_col = 'pred_3utr_normalized'
             self.structure_probing_threshold = 0.4574
-        except:
-            try:
-                self.df = pd.read_parquet(self.dsrna_file, columns=columns + ['pred_3utr_All_power_weighted_advantage'])
-                self.has_structure_probing = True
-                self.structure_probing_col = 'pred_3utr_All_power_weighted_advantage'
-                self.structure_probing_threshold = 0.0315
-            except:
-                self.df = pd.read_parquet(self.dsrna_file, columns=columns)
-                self.has_structure_probing = False
-        
-        logger.info(f"Loaded {len(self.df):,} dsRNA regions")
-        self._define_subsets()
+        elif 'pred_3utr_All_power_weighted_advantage' in self.df.columns:
+            self.has_structure_probing = True
+            self.structure_probing_col = 'pred_3utr_All_power_weighted_advantage'
+            self.structure_probing_threshold = 0.0315
+        else:
+            self.has_structure_probing = False
     
     def _define_subsets(self):
-        """Define available dsRNA subsets"""
-        # Conservation mask
-        conserved_mask = (
-            (self.df['i_phast17'] > 0.5) & (self.df['j_phast17'] > 0.5) &
-            (self.df['i_phast100'] > 0.5) & (self.df['j_phast100'] > 0.5)
-        )
-        
-        # ML masks
-        ml_structure_mask = self.df['pred_prob_editing_structure_only_alu100pct'] > 0.2471
-        ml_gtex_mask = self.df['pred_prob_editing_gtex_alu100pct'] > 0.2513
-        
-        # Define base subsets
-        self.available_subsets = {
-            'all': None,  # No filter
-            'conserved': conserved_mask,
-            'ml_structure': ml_structure_mask,
-            'ml_gtex': ml_gtex_mask,
-        }
-        
-        # Add structure probing if available
-        if self.has_structure_probing:
+        """Define available dsRNA subsets based on columns present in the data"""
+        self.available_subsets = {'all': None}
+
+        # Conservation subsets (parquet format only)
+        has_conservation = all(c in self.df.columns for c in
+                              ['i_phast17', 'j_phast17', 'i_phast100', 'j_phast100'])
+        if has_conservation:
+            conserved_mask = (
+                (self.df['i_phast17'] > 0.5) & (self.df['j_phast17'] > 0.5) &
+                (self.df['i_phast100'] > 0.5) & (self.df['j_phast100'] > 0.5)
+            )
+            self.available_subsets['conserved'] = conserved_mask
+
+        # Legacy ML masks (parquet format)
+        ml_masks = []
+        if 'pred_prob_editing_structure_only_alu100pct' in self.df.columns:
+            ml_structure_mask = self.df['pred_prob_editing_structure_only_alu100pct'] > 0.2471
+            self.available_subsets['ml_structure'] = ml_structure_mask
+            ml_masks.append(ml_structure_mask)
+        if 'pred_prob_editing_gtex_alu100pct' in self.df.columns:
+            ml_gtex_mask = self.df['pred_prob_editing_gtex_alu100pct'] > 0.2513
+            self.available_subsets['ml_gtex'] = ml_gtex_mask
+            ml_masks.append(ml_gtex_mask)
+
+        # dsRNAscan ML scores (TSV format)
+        # Use pre-computed categorical columns if available, otherwise threshold
+        if 'likely_edited' in self.df.columns:
+            self.available_subsets['likely_edited'] = self.df['likely_edited']
+            ml_masks.append(self.df['likely_edited'])
+        elif 'stability_model_score' in self.df.columns:
+            mask = self.df['stability_model_score'] > 0.2471
+            self.available_subsets['likely_edited'] = mask
+            ml_masks.append(mask)
+        if 'likely_forms' in self.df.columns:
+            self.available_subsets['likely_forms'] = self.df['likely_forms']
+            ml_masks.append(self.df['likely_forms'])
+        elif 'probing_model_score' in self.df.columns:
+            mask = self.df['probing_model_score'] > 0.0315
+            self.available_subsets['likely_forms'] = mask
+            ml_masks.append(mask)
+
+        # Structure probing (parquet format)
+        if self.has_structure_probing and hasattr(self, 'structure_probing_col'):
             ml_probing_mask = self.df[self.structure_probing_col] > self.structure_probing_threshold
             self.available_subsets['ml_structure_probing'] = ml_probing_mask
-            
-            # Any high confidence
-            ml_any_mask = ml_structure_mask | ml_gtex_mask | ml_probing_mask
+            ml_masks.append(ml_probing_mask)
+
+        # Combined high-confidence subset
+        if ml_masks:
+            ml_any_mask = ml_masks[0]
+            for m in ml_masks[1:]:
+                ml_any_mask = ml_any_mask | m
             self.available_subsets['any_high_conf'] = ml_any_mask
-            self.available_subsets['conserved_high_conf'] = conserved_mask & ml_any_mask
-        else:
-            ml_any_mask = ml_structure_mask | ml_gtex_mask
-            self.available_subsets['any_high_conf'] = ml_any_mask
-            self.available_subsets['conserved_high_conf'] = conserved_mask & ml_any_mask
-        
-        # Alu-based subsets if available
+            if has_conservation:
+                self.available_subsets['conserved_high_conf'] = conserved_mask & ml_any_mask
+
+        # Alu-based subsets (parquet format)
         if 'alu' in self.df.columns:
             alu_mask = self.df['alu'] == 'Alu'
             nonalu_mask = self.df['alu'] == 'Non-Alu'
-            
             self.available_subsets['alu'] = alu_mask
             self.available_subsets['nonalu'] = nonalu_mask
-            self.available_subsets['alu_high_conf'] = alu_mask & ml_any_mask
-            self.available_subsets['nonalu_high_conf'] = nonalu_mask & ml_any_mask
-        
+            if ml_masks:
+                self.available_subsets['alu_high_conf'] = alu_mask & ml_any_mask
+                self.available_subsets['nonalu_high_conf'] = nonalu_mask & ml_any_mask
+
         # Log available subsets
         for name, mask in self.available_subsets.items():
-            if mask is None:
-                count = len(self.df)
-            else:
-                count = mask.sum()
+            count = len(self.df) if mask is None else mask.sum()
             logger.info(f"  Subset '{name}': {count:,} dsRNAs")
     
     def get_subset_bed(self, subset_name: str = 'all') -> Tuple[pybedtools.BedTool, int]:
-        """Get BedTool for specified dsRNA subset"""
+        """Get BedTool for specified dsRNA subset (vectorized)"""
         if subset_name not in self.available_subsets:
             raise ValueError(f"Unknown subset: {subset_name}. Available: {list(self.available_subsets.keys())}")
-        
-        # Apply subset filter
+
         mask = self.available_subsets[subset_name]
-        if mask is None:
-            subset_df = self.df
-        else:
-            subset_df = self.df[mask]
-        
-        # Create BED entries for both arms
-        bed_entries = []
+        subset_df = self.df if mask is None else self.df[mask]
+
         logger.info(f"Creating BED entries for {len(subset_df):,} dsRNAs...")
-        
-        for idx, row in tqdm(subset_df.iterrows(), total=len(subset_df), 
-                           desc="Processing dsRNAs", disable=len(subset_df) < 1000):
-            # i-arm
-            bed_entries.append([
-                row['er_chr'], 
-                int(row['er_i_start']), 
-                int(row['er_i_end']),
-                f"dsRNA_{idx}_i",
-                0,
-                row['er_strand']
-            ])
-            # j-arm
-            bed_entries.append([
-                row['er_chr'], 
-                int(row['er_j_start']), 
-                int(row['er_j_end']),
-                f"dsRNA_{idx}_j",
-                0,
-                row['er_strand']
-            ])
-        
-        # Create temporary BED file
+
+        # Vectorized: build both arms as DataFrames and concatenate
+        idx_labels = subset_df.index.astype(str)
+
+        i_arms = pd.DataFrame({
+            'chrom': subset_df['chr'].values,
+            'start': subset_df['i_start'].astype(int).values,
+            'end': subset_df['i_end'].astype(int).values,
+            'name': 'dsRNA_' + idx_labels + '_i',
+            'score': 0,
+            'strand': subset_df['strand'].values,
+        })
+        j_arms = pd.DataFrame({
+            'chrom': subset_df['chr'].values,
+            'start': subset_df['j_start'].astype(int).values,
+            'end': subset_df['j_end'].astype(int).values,
+            'name': 'dsRNA_' + idx_labels + '_j',
+            'score': 0,
+            'strand': subset_df['strand'].values,
+        })
+
+        bed_df = pd.concat([i_arms, j_arms], ignore_index=True)
+
         temp_bed = get_temp_filename(f"dsrna_{subset_name}", ".bed")
-        pd.DataFrame(bed_entries).to_csv(temp_bed, sep='\t', header=False, index=False)
-        
+        bed_df.to_csv(temp_bed, sep='\t', header=False, index=False)
+
         return pybedtools.BedTool(temp_bed), len(subset_df)
 
 

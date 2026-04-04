@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dsrnascan"
-version = "0.4.7"
+version = "0.4.8"
 description = "A tool for genome-wide prediction of double-stranded RNA structures"
 readme = "README.md"
 authors = [
@@ -34,10 +34,11 @@ dependencies = [
     "ViennaRNA>=2.4",
     "psutil>=5.8",
     "tqdm>=4.0",
+    "ydf>=0.9.0",
+    "scikit-learn>=1.0",
 ]
 
 [project.optional-dependencies]
-scoring = ["ydf>=0.9.0", "scikit-learn>=1.0"]
 mpi = ["mpi4py>=3.0", "parasail>=1.2"]
 dev = [
     "pytest>=6.0",

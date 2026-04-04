@@ -1,0 +1,18 @@
+{
+  "context": "All",
+  "label": "power_weighted_advantage",
+  "test_r2": 0.03351172916368239,
+  "test_corr": 0.1945344616202297,
+  "test_rmse": 0.12260358629953337,
+  "cv_mean": 0.05773364624468504,
+  "cv_std": 0.016543336466070174,
+  "n_samples": 3729,
+  "feature_importance": {
+    "length": 0.15537560350243804,
+    "percent_paired": 0.264954213501133,
+    "loop_length": 0.14296938621659877,
+    "bp_count": 0.20383722413403538,
+    "er_energy": 0.23286357264579471
+  },
+  "training_date": "2025-06-25T18:45:36.865356"
+}

@@ -4,7 +4,7 @@ dsRNAscan - A tool for genome-wide prediction of double-stranded RNA structures
 Copyright (C) 2024 Bass Lab
 """
 
-__version__ = '0.4.6'
+__version__ = '0.4.8'
 __author__ = 'Bass Lab'
 
 import os
@@ -227,6 +227,89 @@ def verify_gu_wobble_support():
 def is_valid_fragment(fragment):
     # Validation logic for fragment
     return fragment != len(fragment) * "N"
+
+
+def generate_gff3_file(input_file, output_file):
+    """Generate a GFF3 file from dsRNAscan results.
+
+    Uses mRNA/exon types so IGV renders the two arms as a single linked feature
+    with the loop region shown as an intron.
+    """
+    try:
+        df = pd.read_csv(input_file, sep="\t")
+        if df.empty:
+            return
+    except Exception:
+        return
+
+    with open(output_file, 'w') as f:
+        f.write("##gff-version 3\n")
+        f.write(f"##source dsRNAscan v{__version__}\n")
+
+        for idx, row in df.iterrows():
+            chrom = row['Chromosome']
+            strand = row['Strand']
+            i_start = int(row['i_start'])
+            i_end = int(row['i_end'])
+            j_start = int(row['j_start'])
+            j_end = int(row['j_end'])
+            score = row.get('Score', '.')
+            dsrna_id = f"dsRNA_{chrom}_{idx + 1:06d}"
+
+            # Build attributes for the parent feature
+            # -- Core attributes (always included) --
+            attrs = (
+                f"ID={dsrna_id};Name={dsrna_id}"
+                f";dG={row.get('dG(kcal/mol)', '.')}"
+                f";percent_paired={row.get('percent_paired', '.')}"
+                f";longest_helix={row.get('longest_helix', '.')}"
+            )
+            # -- Optional attributes (uncomment to include) --
+            # attrs += f";base_pairs={row.get('base_pairs', '.')}"
+            # attrs += f";RawMatch={row.get('RawMatch', '.')}"
+            # attrs += f";PercMatch={row.get('PercMatch', '.')}"
+            # attrs += f";stability_model_score={row.get('stability_model_score', '.')}"
+            # attrs += f";probing_model_score={row.get('probing_model_score', '.')}"
+
+            # Parent feature spanning both arms
+            span_start = min(i_start, j_start)
+            span_end = max(i_end, j_end)
+            f.write(f"{chrom}\tdsRNAscan\tmRNA\t{span_start}\t{span_end}\t{score}\t{strand}\t.\t{attrs}\n")
+
+            # Child features for each arm
+            f.write(f"{chrom}\tdsRNAscan\texon\t{i_start}\t{i_end}\t.\t{strand}\t.\tParent={dsrna_id};Name=i_arm\n")
+            f.write(f"{chrom}\tdsRNAscan\texon\t{j_start}\t{j_end}\t.\t{strand}\t.\tParent={dsrna_id};Name=j_arm\n")
+
+    print(f"Successfully wrote GFF3 file to {output_file}")
+
+
+def generate_bedpe_file(input_file, output_file):
+    """Generate a BEDPE file from dsRNAscan results.
+
+    Minimal format: one line per dsRNA with paired coordinates.
+    For full details, see the *_merged_results.txt file.
+    """
+    try:
+        df = pd.read_csv(input_file, sep="\t")
+        if df.empty:
+            return
+    except Exception:
+        return
+
+    with open(output_file, 'w') as f:
+        f.write("#chrom1\tstart1\tend1\tchrom2\tstart2\tend2\tname\tscore\tstrand1\tstrand2\n")
+
+        for idx, row in df.iterrows():
+            chrom = row['Chromosome']
+            strand = row['Strand']
+            dsrna_id = f"dsRNA_{chrom}_{idx + 1:06d}"
+
+            # BEDPE uses 0-based starts
+            f.write(f"{chrom}\t{int(row['i_start']) - 1}\t{int(row['i_end'])}\t"
+                    f"{chrom}\t{int(row['j_start']) - 1}\t{int(row['j_end'])}\t"
+                    f"{dsrna_id}\t{row.get('Score', '.')}\t{strand}\t{strand}\n")
+
+    print(f"Successfully wrote BEDPE file to {output_file}")
 
 
 def generate_bp_file(input_file, output_file):
@@ -1779,10 +1862,14 @@ def run_dataframe_approach(args):
     print(f"\nResults saved to: {output_file}")
     print(f"Total dsRNA structures found: {len(results)}")
 
-    # Generate BP file if needed
+    # Generate output files
     if not results.empty:
         bp_file = output_file.replace('.txt', '.bp')
         generate_bp_file(output_file, bp_file)
+        gff3_file = output_file.replace('.txt', '.gff3')
+        generate_gff3_file(output_file, gff3_file)
+        bedpe_file = output_file.replace('.txt', '.bedpe')
+        generate_bedpe_file(output_file, bedpe_file)
     
     return len(results)
 
