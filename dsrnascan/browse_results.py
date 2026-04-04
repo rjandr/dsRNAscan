@@ -15,9 +15,8 @@ import socketserver
 import webbrowser
 import argparse
 from pathlib import Path
-import tempfile
-import shutil
 from http.server import SimpleHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 from collections import defaultdict
 import bisect
 
@@ -552,443 +551,482 @@ def map_editing_to_dsrna(dsrna_row, editing_sites):
     
     return structure_edits
 
-def process_dsrnascan_results(results_file, editing_sites=None):
-    """
-    Process dsRNAscan results file and convert to JSON format for web display
-    """
-    try:
-        # Read the results file
-        df = pd.read_csv(results_file, sep='\t')
-        
-        # Filter out empty rows
-        df = df.dropna(subset=['Chromosome'])
-        
-        if df.empty:
-            print(f"Warning: No valid results found in {results_file}")
-            return []
-        
-        # Convert to list of dictionaries for JSON serialization
+def _safe_val(val, dtype=float, default=0):
+    """Safely convert a pandas value, handling NaN"""
+    if pd.isna(val):
+        return default
+    return dtype(val)
+
+
+class DSRNARequestHandler(SimpleHTTPRequestHandler):
+    """HTTP handler that serves the UI and API endpoints for browsing results"""
+
+    # Class-level attributes set before server starts
+    df = None
+    editing_sites = None
+    html_content = ""
+
+    def end_headers(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        super().end_headers()
+
+    def log_message(self, format, *args):
+        """Suppress default request logging"""
+        pass
+
+    def _send_json(self, data):
+        body = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        params = parse_qs(parsed.query)
+
+        if path == '/' or path == '/index.html':
+            body = self.html_content.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', len(body))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path == '/api/summary':
+            self._handle_summary()
+        elif path == '/api/results':
+            self._handle_results(params)
+        elif path.startswith('/api/result/'):
+            try:
+                result_id = int(path.split('/')[-1])
+                self._handle_single_result(result_id)
+            except (ValueError, IndexError):
+                self.send_error(400, "Invalid result ID")
+        else:
+            self.send_error(404)
+
+    def _handle_summary(self):
+        df = self.__class__.df
+        chrom_counts = df.groupby('Chromosome').size().to_dict()
+        # Natural sort chromosomes
+        chroms = sorted(chrom_counts.keys(), key=_natural_sort_key)
+        self._send_json({
+            'total': len(df),
+            'chromosomes': [{'name': c, 'count': chrom_counts[c]} for c in chroms],
+            'has_editing': self.__class__.editing_sites is not None
+        })
+
+    def _handle_results(self, params):
+        df = self.__class__.df
+
+        # Filter
+        chrom = params.get('chromosome', [None])[0]
+        strand = params.get('strand', [None])[0]
+        if chrom:
+            df = df[df['Chromosome'] == chrom]
+        if strand:
+            df = df[df['Strand'] == strand]
+
+        total = len(df)
+
+        # Sort
+        sort_col = params.get('sort', ['Score'])[0]
+        sort_dir = params.get('sort_dir', ['desc'])[0]
+        col_map = {
+            'score': 'Score', 'dG': 'dG(kcal/mol)', 'percent_paired': 'percent_paired',
+            'longest_helix': 'longest_helix', 'i_start': 'i_start', 'base_pairs': 'base_pairs',
+            'Score': 'Score', 'dG(kcal/mol)': 'dG(kcal/mol)'
+        }
+        actual_col = col_map.get(sort_col, 'Score')
+        if actual_col in df.columns:
+            df = df.sort_values(actual_col, ascending=(sort_dir == 'asc'), na_position='last')
+
+        # Paginate
+        page = int(params.get('page', [0])[0])
+        page_size = int(params.get('page_size', [50])[0])
+        page_size = min(page_size, 200)
+        start = page * page_size
+        page_df = df.iloc[start:start + page_size]
+
+        # Return lightweight columns only (no sequences/structure)
         results = []
-        for idx, row in df.iterrows():
-            result = {
-                'id': f'dsRNA_{idx}',
+        for idx, row in page_df.iterrows():
+            r = {
+                'id': int(idx),
                 'chromosome': str(row['Chromosome']),
                 'strand': str(row['Strand']),
-                'score': float(row['Score']) if pd.notna(row['Score']) else 0,
-                'i_start': int(row['i_start']),
-                'i_end': int(row['i_end']),
-                'j_start': int(row['j_start']),
-                'j_end': int(row['j_end']),
-                'i_seq': str(row['i_seq']) if pd.notna(row['i_seq']) else '',
-                'j_seq': str(row['j_seq']) if pd.notna(row['j_seq']) else '',
-                'structure': str(row['structure']) if pd.notna(row['structure']) else '',
-                'dG': float(row['dG(kcal/mol)']) if pd.notna(row['dG(kcal/mol)']) else 0,
-                'percent_paired': float(row['percent_paired']) if pd.notna(row['percent_paired']) else 0
+                'i_start': _safe_val(row['i_start'], int, 0),
+                'i_end': _safe_val(row['i_end'], int, 0),
+                'j_start': _safe_val(row['j_start'], int, 0),
+                'j_end': _safe_val(row['j_end'], int, 0),
+                'score': _safe_val(row['Score'], float, 0),
+                'dG': _safe_val(row.get('dG(kcal/mol)', 0), float, 0),
+                'percent_paired': _safe_val(row.get('percent_paired', 0), float, 0),
+                'base_pairs': _safe_val(row.get('base_pairs', 0), int, 0),
+                'longest_helix': _safe_val(row.get('longest_helix', 0), int, 0),
+                'i_len': len(str(row['i_seq'])) if pd.notna(row.get('i_seq')) else 0,
+                'j_len': len(str(row['j_seq'])) if pd.notna(row.get('j_seq')) else 0,
             }
-            
-            # Add optional fields if they exist
-            if 'longest_helix' in row and pd.notna(row['longest_helix']):
-                result['longest_helix'] = int(row['longest_helix'])
-            
-            # Add effective coordinates if available
-            if 'eff_i_start' in row and pd.notna(row['eff_i_start']):
-                result['eff_i_start'] = int(row['eff_i_start'])
-                result['eff_i_end'] = int(row['eff_i_end'])
-                result['eff_j_start'] = int(row['eff_j_start'])
-                result['eff_j_end'] = int(row['eff_j_end'])
-            
-            # Map editing sites if provided
-            if editing_sites:
-                result['editing_sites'] = map_editing_to_dsrna(row, editing_sites)
-            
-            results.append(result)
-        
-        return results
-    
-    except Exception as e:
-        print(f"Error processing {results_file}: {e}")
-        return []
+            if 'stability_score' in row:
+                r['stability_score'] = _safe_val(row['stability_score'], float, None)
+            if 'probing_score' in row:
+                r['probing_score'] = _safe_val(row['probing_score'], float, None)
+            results.append(r)
 
-def create_html_page(results_data, output_dir, has_editing=False):
-    """
-    Create a simple HTML page for viewing dsRNA structures with Forna
-    """
-    html_content = '''<!DOCTYPE html>
+        self._send_json({
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'results': results
+        })
+
+    def _handle_single_result(self, result_id):
+        df = self.__class__.df
+        if result_id not in df.index:
+            self.send_error(404, "Result not found")
+            return
+
+        row = df.loc[result_id]
+        result = {
+            'id': result_id,
+            'chromosome': str(row['Chromosome']),
+            'strand': str(row['Strand']),
+            'i_start': _safe_val(row['i_start'], int, 0),
+            'i_end': _safe_val(row['i_end'], int, 0),
+            'j_start': _safe_val(row['j_start'], int, 0),
+            'j_end': _safe_val(row['j_end'], int, 0),
+            'score': _safe_val(row['Score'], float, 0),
+            'dG': _safe_val(row.get('dG(kcal/mol)', 0), float, 0),
+            'percent_paired': _safe_val(row.get('percent_paired', 0), float, 0),
+            'base_pairs': _safe_val(row.get('base_pairs', 0), int, 0),
+            'longest_helix': _safe_val(row.get('longest_helix', 0), int, 0),
+            'i_seq': str(row['i_seq']) if pd.notna(row['i_seq']) else '',
+            'j_seq': str(row['j_seq']) if pd.notna(row['j_seq']) else '',
+            'structure': str(row['structure']) if pd.notna(row['structure']) else '',
+        }
+
+        # Add effective coordinates
+        for col in ['eff_i_start', 'eff_i_end', 'eff_j_start', 'eff_j_end']:
+            if col in row and pd.notna(row[col]):
+                result[col] = int(row[col])
+
+        # Add ML scores
+        for col in ['stability_score', 'probing_score']:
+            if col in row and pd.notna(row[col]):
+                result[col] = float(row[col])
+
+        # Compute editing sites on demand
+        editing_sites = self.__class__.editing_sites
+        if editing_sites:
+            result['editing_sites'] = map_editing_to_dsrna(row, editing_sites)
+
+        self._send_json(result)
+
+
+def _natural_sort_key(s):
+    """Sort strings with embedded numbers naturally (chr1, chr2, ..., chr10)"""
+    import re
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(s))]
+
+
+def create_html_page(has_editing=False):
+    """Generate the HTML page with API-driven UI"""
+    return '''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>dsRNA Structure Viewer''' + (' with Editing Sites' if has_editing else '') + '''</title>
-    
-    <!-- jQuery -->
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    
-    <!-- D3 and Fornac for structure visualization -->
+    <title>dsRNA Structure Browser</title>
     <script src="https://d3js.org/d3.v3.min.js"></script>
     <script src="https://cdn.jsdelivr.net/gh/ViennaRNA/fornac@master/dist/fornac.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/ViennaRNA/fornac@master/dist/fornac.css">
-    
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 20px;
-            background-color: #f5f5f5;
-        }
-        
-        .header {
-            text-align: center;
-            margin-bottom: 30px;
-        }
-        
-        .controls {
-            text-align: center;
-            margin-bottom: 20px;
-        }
-        
-        select {
-            padding: 8px;
-            font-size: 16px;
-            margin: 0 10px;
-        }
-        
-        /* Style for options with editing sites */
-        select option[style*="background-color"] {
-            background-color: #D5F4E6 !important;
-            font-weight: 500;
-        }
-        
-        /* Additional visual cue with emoji */
-        .has-edits::before {
-            content: "🟢 ";
-        }
-        
-        .info {
-            background: white;
-            padding: 15px;
-            border-radius: 5px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        
-        #structure-viewer {
-            background: white;
-            height: 600px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        
-        .metric {
-            display: inline-block;
-            margin-right: 30px;
-            font-size: 16px;
-        }
-        
-        .metric-label {
-            font-weight: bold;
-            color: #666;
-        }
-        
-        .metric-value {
-            color: #2c3e50;
-            font-family: monospace;
-            font-size: 18px;
-        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+               background: #f0f2f5; color: #1a1a2e; }
+        .header { background: #1a1a2e; color: white; padding: 16px 24px; }
+        .header h1 { font-size: 20px; font-weight: 600; }
+        .header .subtitle { font-size: 13px; color: #8888aa; margin-top: 4px; }
+        .controls { display: flex; gap: 12px; padding: 16px 24px; background: white;
+                     border-bottom: 1px solid #e0e0e0; flex-wrap: wrap; align-items: center; }
+        .controls select, .controls button { padding: 6px 12px; border: 1px solid #ccc;
+                     border-radius: 4px; font-size: 13px; background: white; }
+        .controls button { cursor: pointer; background: #f5f5f5; }
+        .controls button:hover { background: #e8e8e8; }
+        .controls .total { font-size: 13px; color: #666; margin-left: auto; }
+        .main { display: flex; height: calc(100vh - 120px); }
+        .table-panel { flex: 1; overflow-y: auto; border-right: 1px solid #e0e0e0; background: white; }
+        .viewer-panel { flex: 1; display: flex; flex-direction: column; background: white; }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        th { position: sticky; top: 0; background: #f8f9fa; padding: 8px 10px; text-align: left;
+             border-bottom: 2px solid #dee2e6; cursor: pointer; white-space: nowrap; user-select: none; }
+        th:hover { background: #e9ecef; }
+        th.sorted-asc::after { content: " \\25B2"; font-size: 10px; }
+        th.sorted-desc::after { content: " \\25BC"; font-size: 10px; }
+        td { padding: 6px 10px; border-bottom: 1px solid #f0f0f0; white-space: nowrap; }
+        tr { cursor: pointer; }
+        tr:hover { background: #f0f4ff; }
+        tr.selected { background: #d0e0ff; }
+        .pagination { display: flex; align-items: center; justify-content: center; gap: 8px;
+                       padding: 8px; border-top: 1px solid #e0e0e0; font-size: 13px; background: #fafafa; }
+        .info-bar { padding: 12px 16px; background: #f8f9fa; border-bottom: 1px solid #e0e0e0;
+                     font-size: 13px; display: none; }
+        .info-bar .metrics { display: flex; gap: 24px; flex-wrap: wrap; }
+        .info-bar .metric-label { color: #666; }
+        .info-bar .metric-value { font-weight: 600; font-family: monospace; }
+        #forna-viewer { flex: 1; min-height: 400px; }
+        .loading { text-align: center; padding: 40px; color: #999; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>dsRNA Structure Viewer''' + (' with RNA Editing Sites' if has_editing else '') + '''</h1>
-        <p>Visualize predicted double-stranded RNA structures''' + (' with editing annotations' if has_editing else '') + '''</p>
+        <h1>dsRNA Structure Browser</h1>
+        <div class="subtitle" id="summary-text">Loading...</div>
     </div>
-    
     <div class="controls">
-        <label>Select structure: </label>
-        <select id="structure-select">
-            <option value="">Choose a structure...</option>
+        <label>Chr:</label>
+        <select id="chrom-filter"><option value="">All</option></select>
+        <label>Strand:</label>
+        <select id="strand-filter">
+            <option value="">Both</option>
+            <option value="+">+</option>
+            <option value="-">-</option>
         </select>
-        <div id="edit-summary" style="margin-top: 10px; font-size: 14px; color: #27AE60;"></div>
+        <label>Sort:</label>
+        <select id="sort-col">
+            <option value="score">Score</option>
+            <option value="dG">dG</option>
+            <option value="percent_paired">% Paired</option>
+            <option value="longest_helix">Helix</option>
+            <option value="base_pairs">Base Pairs</option>
+            <option value="i_start">Position</option>
+        </select>
+        <select id="sort-dir">
+            <option value="desc">Desc</option>
+            <option value="asc">Asc</option>
+        </select>
+        <div class="total" id="total-text"></div>
     </div>
-    
-    <div class="info" id="info-panel" style="display: none;">
-        <div class="metric">
-            <span class="metric-label">Location:</span>
-            <span class="metric-value" id="location"></span>
+    <div class="main">
+        <div class="table-panel">
+            <table>
+                <thead><tr>
+                    <th data-col="i_start">Location</th>
+                    <th data-col="score">Score</th>
+                    <th data-col="dG">dG</th>
+                    <th data-col="base_pairs">BP</th>
+                    <th data-col="percent_paired">%Paired</th>
+                    <th data-col="longest_helix">Helix</th>
+                    <th>Arms</th>
+                </tr></thead>
+                <tbody id="results-body"></tbody>
+            </table>
+            <div class="pagination">
+                <button id="prev-btn" disabled>&lt; Prev</button>
+                <span id="page-info">Page 1</span>
+                <button id="next-btn">Next &gt;</button>
+            </div>
         </div>
-        <div class="metric">
-            <span class="metric-label">Free Energy:</span>
-            <span class="metric-value" id="energy"></span>
-        </div>
-        <div class="metric">
-            <span class="metric-label">Base Pairs:</span>
-            <span class="metric-value" id="pairs"></span>
-        </div>
-        <div class="metric">
-            <span class="metric-label">Score:</span>
-            <span class="metric-value" id="score"></span>
+        <div class="viewer-panel">
+            <div class="info-bar" id="info-bar">
+                <div class="metrics" id="metrics"></div>
+                <div id="seq-panel" style="display:none; margin-top:8px; padding-top:8px; border-top:1px solid #e0e0e0;"></div>
+            </div>
+            <div id="forna-viewer"><div class="loading">Select a structure from the table</div></div>
         </div>
     </div>
-    
-    <div id="structure-viewer"></div>
-    
-    <script>
-        // Load the results data
-        const resultsData = ''' + json.dumps(results_data, ensure_ascii=True) + ''';
-        
-        // Function to annotate editing sites on the structure
-        function annotateEditingSites(containerId, editingSites) {
-            const svg = d3.select(`#${containerId} svg`);
-            const allCircles = svg.selectAll('circle');
-            
-            // Get the most common radius (likely nucleotides)
-            const radiusCounts = {};
-            allCircles.each(function() {
-                const r = parseFloat(d3.select(this).attr('r'));
-                radiusCounts[r] = (radiusCounts[r] || 0) + 1;
-            });
-            
-            let mostCommonRadius = 0;
-            let maxCount = 0;
-            for (const [radius, count] of Object.entries(radiusCounts)) {
-                if (count > maxCount) {
-                    maxCount = count;
-                    mostCommonRadius = parseFloat(radius);
-                }
-            }
-            
-            // Select circles with the most common radius (nucleotides)
-            const nucleotideCircles = [];
-            allCircles.each(function() {
-                const circle = d3.select(this);
-                const r = parseFloat(circle.attr('r'));
-                if (Math.abs(r - mostCommonRadius) < 0.1) {
-                    nucleotideCircles.push(this);
-                }
-            });
-            
-            // Annotate editing sites
-            editingSites.forEach(site => {
-                let pos, frequency;
-                
-                if (typeof site === 'number') {
-                    pos = site;
-                    frequency = 1.0;
-                } else if (Array.isArray(site)) {
-                    pos = site[0];
-                    frequency = site[1];
-                } else {
-                    return;
-                }
-                
-                if (pos < nucleotideCircles.length) {
-                    const circle = d3.select(nucleotideCircles[pos]);
-                    
-                    // Calculate color based on frequency
-                    let strokeColor;
-                    let strokeWidth = '3px';
-                    
-                    if (frequency >= 0.8) {
-                        strokeColor = '#0B5345';  // Dark green
-                    } else if (frequency >= 0.5) {
-                        strokeColor = '#148F77';  // Medium-dark green
-                    } else if (frequency >= 0.3) {
-                        strokeColor = '#27AE60';  // Medium green
-                    } else if (frequency >= 0.1) {
-                        strokeColor = '#52BE80';  // Light-medium green
-                    } else {
-                        strokeColor = '#ABEBC6';  // Very light green
-                        strokeWidth = '2px';
-                    }
-                    
-                    circle
-                        .style('stroke', strokeColor)
-                        .style('stroke-width', strokeWidth)
-                        .style('stroke-opacity', 1.0)
-                        .classed('editing-site', true);
-                    
-                    // Add tooltip
-                    let title = circle.select('title');
-                    if (title.empty()) {
-                        title = circle.append('title');
-                    }
-                    const freqText = ` (${(frequency * 100).toFixed(1)}%)`;
-                    title.text(`Position ${pos + 1}: RNA editing site${freqText}`);
-                }
-            });
+<script>
+let state = { page: 0, pageSize: 50, chromosome: '', strand: '', sort: 'score', sortDir: 'desc', total: 0 };
+
+async function fetchJSON(url) { return (await fetch(url)).json(); }
+
+async function init() {
+    const summary = await fetchJSON('/api/summary');
+    document.getElementById('summary-text').textContent =
+        `${summary.total.toLocaleString()} dsRNA structures across ${summary.chromosomes.length} chromosomes`;
+    const sel = document.getElementById('chrom-filter');
+    summary.chromosomes.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.name;
+        opt.textContent = `${c.name} (${c.count.toLocaleString()})`;
+        sel.appendChild(opt);
+    });
+    loadResults();
+}
+
+async function loadResults() {
+    const params = new URLSearchParams({
+        page: state.page, page_size: state.pageSize,
+        sort: state.sort, sort_dir: state.sortDir
+    });
+    if (state.chromosome) params.set('chromosome', state.chromosome);
+    if (state.strand) params.set('strand', state.strand);
+
+    const data = await fetchJSON('/api/results?' + params);
+    state.total = data.total;
+
+    const totalPages = Math.ceil(data.total / state.pageSize);
+    document.getElementById('total-text').textContent = `${data.total.toLocaleString()} results`;
+    document.getElementById('page-info').textContent = `Page ${state.page + 1} of ${totalPages || 1}`;
+    document.getElementById('prev-btn').disabled = state.page === 0;
+    document.getElementById('next-btn').disabled = state.page >= totalPages - 1;
+
+    const tbody = document.getElementById('results-body');
+    tbody.innerHTML = '';
+    data.results.forEach(r => {
+        const tr = document.createElement('tr');
+        tr.dataset.id = r.id;
+        tr.innerHTML = `<td>${r.chromosome}:${r.i_start.toLocaleString()}-${r.j_end.toLocaleString()} (${r.strand})</td>
+            <td>${r.score}</td><td>${r.dG.toFixed(1)}</td><td>${r.base_pairs}</td>
+            <td>${r.percent_paired.toFixed(1)}%</td><td>${r.longest_helix}</td>
+            <td>${r.i_len}/${r.j_len}</td>`;
+        tr.addEventListener('click', () => selectResult(r.id, tr));
+        tbody.appendChild(tr);
+    });
+}
+
+async function selectResult(id, tr) {
+    document.querySelectorAll('tr.selected').forEach(el => el.classList.remove('selected'));
+    if (tr) tr.classList.add('selected');
+
+    const data = await fetchJSON('/api/result/' + id);
+    showInfo(data);
+    showStructure(data);
+}
+
+function showInfo(d) {
+    const bar = document.getElementById('info-bar');
+    bar.style.display = 'block';
+    const span = d.j_end - d.i_start + 1;
+    let html = `<div><span class="metric-label">Location:</span> <span class="metric-value">${d.chromosome}:${d.i_start.toLocaleString()}-${d.j_end.toLocaleString()} (${d.strand})</span></div>
+        <div><span class="metric-label">Energy:</span> <span class="metric-value">${d.dG.toFixed(1)} kcal/mol</span></div>
+        <div><span class="metric-label">Score:</span> <span class="metric-value">${d.score}</span></div>
+        <div><span class="metric-label">Base Pairs:</span> <span class="metric-value">${d.base_pairs} (${d.percent_paired.toFixed(1)}%)</span></div>
+        <div><span class="metric-label">Helix:</span> <span class="metric-value">${d.longest_helix} bp</span></div>
+        <div><span class="metric-label">Span:</span> <span class="metric-value">${span.toLocaleString()} bp</span></div>`;
+    if (d.stability_score != null) html += `<div><span class="metric-label">Stability:</span> <span class="metric-value">${d.stability_score.toFixed(3)}</span></div>`;
+    if (d.probing_score != null) html += `<div><span class="metric-label">Probing:</span> <span class="metric-value">${d.probing_score.toFixed(3)}</span></div>`;
+    if (d.editing_sites && d.editing_sites.length > 0) html += `<div><span class="metric-label" style="color:#27AE60">Editing Sites:</span> <span class="metric-value">${d.editing_sites.length}</span></div>`;
+    document.getElementById('metrics').innerHTML = html;
+
+    // Populate sequence panel - hidden data with copy buttons only
+    const seqPanel = document.getElementById('seq-panel');
+    if (d.i_seq && d.j_seq) {
+        const parts = d.structure ? d.structure.split('&') : ['',''];
+        const btnStyle = 'font-size:11px; padding:2px 8px; cursor:pointer; margin-left:6px; border:1px solid #ccc; border-radius:3px; background:#fff;';
+        seqPanel.style.display = 'block';
+        seqPanel.innerHTML = `
+            <span style="font-family:sans-serif; font-size:12px; color:#666;"><strong>Copy:</strong></span>
+            <button onclick="copyText('seq-i',this)" style="${btnStyle}">i-seq (${d.i_seq.length} nt)</button>
+            <button onclick="copyText('str-i',this)" style="${btnStyle}">i-struct</button>
+            <button onclick="copyText('seq-j',this)" style="${btnStyle}">j-seq (${d.j_seq.length} nt)</button>
+            <button onclick="copyText('str-j',this)" style="${btnStyle}">j-struct</button>
+            <span id="seq-i" style="display:none;">${d.i_seq}</span>
+            <span id="str-i" style="display:none;">${parts[0]}</span>
+            <span id="seq-j" style="display:none;">${d.j_seq}</span>
+            <span id="str-j" style="display:none;">${parts[1]}</span>`;
+    } else {
+        seqPanel.style.display = 'none';
+    }
+}
+
+function showStructure(data) {
+    const viewer = document.getElementById('forna-viewer');
+    viewer.innerHTML = '';
+
+    const parts = data.structure.split('&');
+    const sequence = data.i_seq + data.j_seq;
+    const structure = parts[0] + parts[1];
+    const totalLen = sequence.length;
+
+    // For large structures, skip Forna rendering (sequences available in panel below)
+    if (totalLen > 500) {
+        viewer.innerHTML = `<div class="loading">Structure too large for interactive view (${totalLen} nt). Use copy buttons below.</div>`;
+        return;
+    }
+
+    const container = document.createElement('div');
+    container.id = 'forna-container';
+    container.style.width = '100%';
+    container.style.height = '100%';
+    viewer.appendChild(container);
+
+    const rnaViz = new fornac.FornaContainer("#forna-container", {
+        applyForce: true, allowPanningAndZooming: true,
+        initialSize: [viewer.offsetWidth || 600, viewer.offsetHeight || 500],
+        friction: 0.35, middleCharge: -30, otherCharge: -30
+    });
+    rnaViz.addRNA(structure, { structure: structure, sequence: sequence, labelInterval: 10 });
+
+    if (data.editing_sites && data.editing_sites.length > 0) {
+        setTimeout(() => annotateEditingSites('forna-container', data.editing_sites), 1500);
+    }
+    setTimeout(() => { rnaViz.centerView(); rnaViz.zoomToFit(); }, 1000);
+}
+
+function copyText(elemId, btn) {
+    const text = document.getElementById(elemId).textContent;
+    navigator.clipboard.writeText(text).then(() => {
+        const orig = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = orig; }, 1500);
+    });
+}
+
+function annotateEditingSites(containerId, editingSites) {
+    const svg = d3.select('#' + containerId + ' svg');
+    const allCircles = svg.selectAll('circle');
+    const radiusCounts = {};
+    allCircles.each(function() { const r = parseFloat(d3.select(this).attr('r')); radiusCounts[r] = (radiusCounts[r]||0)+1; });
+    let mostCommonRadius = 0, maxCount = 0;
+    for (const [r, c] of Object.entries(radiusCounts)) { if (c > maxCount) { maxCount = c; mostCommonRadius = parseFloat(r); } }
+    const nucs = [];
+    allCircles.each(function() { if (Math.abs(parseFloat(d3.select(this).attr('r')) - mostCommonRadius) < 0.1) nucs.push(this); });
+    editingSites.forEach(site => {
+        const [pos, freq] = Array.isArray(site) ? site : [site, 1.0];
+        if (pos < nucs.length) {
+            const circle = d3.select(nucs[pos]);
+            const color = freq >= 0.8 ? '#0B5345' : freq >= 0.5 ? '#148F77' : freq >= 0.3 ? '#27AE60' : '#52BE80';
+            circle.style('stroke', color).style('stroke-width', '3px').style('stroke-opacity', 1);
+            let title = circle.select('title');
+            if (title.empty()) title = circle.append('title');
+            title.text('Editing site pos ' + (pos+1) + ' (' + (freq*100).toFixed(1) + '%)');
         }
-        
-        // Initialize when page loads
-        document.addEventListener('DOMContentLoaded', function() {
-            const select = document.getElementById('structure-select');
-            
-            // Count dsRNAs with editing sites
-            let editedCount = 0;
-            let totalEdits = 0;
-            
-            // Populate dropdown
-            resultsData.forEach((result, index) => {
-                const hasEdits = result.editing_sites && result.editing_sites.length > 0;
-                const editCount = hasEdits ? result.editing_sites.length : 0;
-                const editInfo = hasEdits ? ` [${editCount} edits]` : '';
-                
-                if (hasEdits) {
-                    editedCount++;
-                    totalEdits += editCount;
-                }
-                
-                // Create option with styling for edited entries
-                let optionHTML = '<option value="' + index + '"';
-                if (hasEdits) {
-                    // Add green background for entries with editing sites
-                    optionHTML += ' style="background-color: #D5F4E6; font-weight: 500;"';
-                }
-                optionHTML += '>' + result.chromosome + ':' + result.i_start + '-' + result.j_end + 
-                    ' (' + result.strand + ', dG=' + result.dG.toFixed(1) + editInfo + ')</option>';
-                
-                select.innerHTML += optionHTML;
-            });
-            
-            // Show summary if there are editing sites
-            if (editedCount > 0) {
-                const summary = document.getElementById('edit-summary');
-                summary.innerHTML = `<strong style="color: #27AE60;">✓</strong> ${editedCount} of ${resultsData.length} dsRNAs have editing sites (${totalEdits} total sites)`;
-                summary.style.display = 'block';
-            }
-            
-            // Handle selection
-            select.addEventListener('change', function() {
-                if (this.value === '') {
-                    document.getElementById('info-panel').style.display = 'none';
-                    document.getElementById('structure-viewer').innerHTML = '';
-                    return;
-                }
-                
-                const data = resultsData[parseInt(this.value)];
-                displayInfo(data);
-                visualizeStructure(data);
-            });
-        });
-        
-        function displayInfo(data) {
-            document.getElementById('info-panel').style.display = 'block';
-            document.getElementById('location').textContent = `${data.chromosome}:${data.i_start}-${data.j_end} (${data.strand})`;
-            document.getElementById('energy').textContent = `${data.dG.toFixed(2)} kcal/mol`;
-            document.getElementById('pairs').textContent = `${data.percent_paired.toFixed(1)}%`;
-            document.getElementById('score').textContent = data.score;
-            
-            // Add simple strand indicator
-            const infoPanel = document.getElementById('info-panel');
-            const existingNote = infoPanel.querySelector('.strand-note');
-            if (existingNote) {
-                existingNote.remove();
-            }
-            
-            // Show detailed structure info for RNA biologists
-            const note = document.createElement('div');
-            note.className = 'strand-note';
-            note.style.cssText = 'margin-top: 10px; padding: 8px; background: #f0f0f0; border-radius: 4px; font-size: 14px; color: #555;';
-            const iLength = data.i_seq ? data.i_seq.length : 0;
-            const jLength = data.j_seq ? data.j_seq.length : 0;
-            
-            // Calculate additional metrics
-            const totalLength = iLength + jLength;
-            const longestHelix = data.longest_helix || 'N/A';
-            const basePairs = Math.round(data.percent_paired * totalLength / 100);
-            const editCount = data.editing_sites ? data.editing_sites.length : 0;
-            
-            // Build detailed info
-            let infoHTML = '<strong>Structure Details:</strong><br>';
-            infoHTML += `• i-arm: positions 1-${iLength} (${iLength} nt)<br>`;
-            infoHTML += `• j-arm: positions ${iLength+1}-${totalLength} (${jLength} nt)<br>`;
-            infoHTML += `• Total length: ${totalLength} nt<br>`;
-            infoHTML += `• Base pairs: ${basePairs} (${data.percent_paired.toFixed(1)}%)<br>`;
-            infoHTML += `• Longest helix: ${longestHelix} bp<br>`;
-            
-            if (editCount > 0) {
-                infoHTML += `• <strong style="color: #27AE60;">RNA editing sites: ${editCount}</strong><br>`;
-            }
-            
-            // Add genomic coordinates if available
-            if (data.i_start && data.j_end) {
-                const genomicSpan = data.j_end - data.i_start + 1;
-                infoHTML += `• Genomic span: ${genomicSpan.toLocaleString()} bp`;
-            }
-            
-            note.innerHTML = infoHTML;
-            infoPanel.appendChild(note);
-        }
-        
-        function visualizeStructure(data) {
-            // Clear previous visualization
-            $('#structure-viewer').empty();
-            
-            // Split the RNAduplex structure on & to get individual arm structures
-            const structureParts = data.structure.split('&');
-            let struct_i = structureParts[0];
-            let struct_j = structureParts[1];
-            
-            // Get sequences (already effective/trimmed from dsRNAscan)
-            let eff_i_seq = data.i_seq;
-            let eff_j_seq = data.j_seq;
-            
-            // Combine sequences and structures for full dsRNA visualization
-            let sequence = eff_i_seq + eff_j_seq;
-            let structure = struct_i + struct_j;
-            
-            // Create container for Forna
-            const container = d3.select('#structure-viewer')
-                .append('div')
-                .attr('id', 'forna-container')
-                .style('width', '100%')
-                .style('height', '600px');
-            
-            // Initialize Forna
-            const rnaViz = new fornac.FornaContainer("#forna-container", {
-                applyForce: true,
-                allowPanningAndZooming: true,
-                initialSize: [800, 580],
-                friction: 0.35,
-                middleCharge: -30,
-                otherCharge: -30
-            });
-            
-            // Add the RNA structure
-            const options = {
-                structure: structure,
-                sequence: sequence,
-                name: data.id,
-                labelInterval: 10
-            };
-            
-            rnaViz.addRNA(structure, options);
-            
-            // Apply editing sites after structure loads
-            if (data.editing_sites && data.editing_sites.length > 0) {
-                setTimeout(() => {
-                    annotateEditingSites('forna-container', data.editing_sites);
-                }, 1500);
-            }
-            
-            // Center and zoom
-            setTimeout(() => {
-                rnaViz.centerView();
-                rnaViz.zoomToFit();
-            }, 1000);
-        }
-    </script>
+    });
+}
+
+// Event listeners
+document.getElementById('chrom-filter').addEventListener('change', e => { state.chromosome = e.target.value; state.page = 0; loadResults(); });
+document.getElementById('strand-filter').addEventListener('change', e => { state.strand = e.target.value; state.page = 0; loadResults(); });
+document.getElementById('sort-col').addEventListener('change', e => { state.sort = e.target.value; state.page = 0; loadResults(); });
+document.getElementById('sort-dir').addEventListener('change', e => { state.sortDir = e.target.value; state.page = 0; loadResults(); });
+document.getElementById('prev-btn').addEventListener('click', () => { if (state.page > 0) { state.page--; loadResults(); } });
+document.getElementById('next-btn').addEventListener('click', () => { state.page++; loadResults(); });
+
+// Column header sorting
+document.querySelectorAll('th[data-col]').forEach(th => {
+    th.addEventListener('click', () => {
+        const col = th.dataset.col;
+        if (state.sort === col) { state.sortDir = state.sortDir === 'desc' ? 'asc' : 'desc'; }
+        else { state.sort = col; state.sortDir = 'desc'; }
+        document.getElementById('sort-col').value = state.sort;
+        document.getElementById('sort-dir').value = state.sortDir;
+        state.page = 0;
+        loadResults();
+    });
+});
+
+init();
+</script>
 </body>
 </html>'''
-    
-    # Write HTML file
-    html_path = os.path.join(output_dir, 'index.html')
-    with open(html_path, 'w') as f:
-        f.write(html_content)
-    
-    return html_path
+
 
 def main():
     parser = argparse.ArgumentParser(description='Browse dsRNAscan results with Forna visualization')
-    parser.add_argument('output_dir', nargs='?', default='.', 
+    parser.add_argument('output_dir', nargs='?', default='.',
                        help='dsRNAscan output directory (default: current directory)')
     parser.add_argument('--editing-file', type=str,
                        help='BED or GFF3 file with RNA editing sites')
@@ -998,102 +1036,68 @@ def main():
                        help='Port for the web server (default: 8080)')
     parser.add_argument('--no-browser', action='store_true',
                        help='Do not automatically open the web browser')
-    
+
     args = parser.parse_args()
-    
-    # Find results files in the output directory
+
+    # Find results files
     output_path = Path(args.output_dir)
     if not output_path.exists():
         print(f"Error: Directory {args.output_dir} does not exist")
         sys.exit(1)
-    
-    # Look for merged_results.txt files (the actual dsRNAscan output)
+
     results_files = list(output_path.glob('*_merged_results.txt'))
-        
     if not results_files:
         print(f"Error: No dsRNAscan results files (*_merged_results.txt) found in {args.output_dir}")
-        print("Make sure you're in a dsRNAscan output directory (e.g., dsrnascan_YYYYMMDD_HHMMSS/)")
         sys.exit(1)
-    
-    # First scan dsRNAscan results to find which chromosomes we need
-    needed_chromosomes = set()
+
+    # Load all results into a single DataFrame
+    dfs = []
     for rf in results_files:
+        print(f"Loading {rf}...")
         try:
-            df = pd.read_csv(rf, sep='\t', usecols=['Chromosome'])
-            needed_chromosomes.update(df['Chromosome'].unique())
-        except:
-            pass
-    
-    print(f"Found dsRNAs on {len(needed_chromosomes)} chromosomes")
-    
-    # Parse editing sites if provided (with lazy loading for needed chromosomes only)
+            df = pd.read_csv(rf, sep='\t')
+            df = df.dropna(subset=['Chromosome'])
+            dfs.append(df)
+        except Exception as e:
+            print(f"  Warning: {e}")
+
+    if not dfs:
+        print("Error: No valid results found")
+        sys.exit(1)
+
+    all_df = pd.concat(dfs, ignore_index=True)
+    print(f"Loaded {len(all_df):,} dsRNA structures")
+
+    # Parse editing sites if provided
     editing_sites = None
     if args.editing_file:
+        needed_chroms = set(all_df['Chromosome'].unique())
         print(f"Loading editing sites from {args.editing_file}...")
-        
-        # Check file size or use forced optimization
         file_size = os.path.getsize(args.editing_file)
-        use_optimized = args.large_editing_file or file_size > 10_000_000  # 10MB
-        
+        use_optimized = args.large_editing_file or file_size > 10_000_000
         if use_optimized:
-            print("Using optimized parser for large file...")
-            editing_sites = parse_editing_file_optimized(args.editing_file, needed_chromosomes)
+            editing_sites = parse_editing_file_optimized(args.editing_file, needed_chroms)
         else:
-            # For smaller files, still use optimized parser but load all chromosomes
             editing_sites = parse_editing_file_optimized(args.editing_file, None)
-    
-    # Process all results files
-    all_results = []
-    for rf in results_files:
-        print(f"Processing {rf}...")
-        results = process_dsrnascan_results(rf, editing_sites)
-        all_results.extend(results)
-    
-    print(f"Loaded {len(all_results)} dsRNA predictions")
-    
-    if editing_sites:
-        # Count how many dsRNAs have editing sites
-        with_edits = sum(1 for r in all_results if r.get('editing_sites'))
-        total_edits = sum(len(r.get('editing_sites', [])) for r in all_results)
-        print(f"Mapped {total_edits} editing sites to {with_edits} dsRNA structures")
-        
-        # Show performance benefit if using optimized structure
-        if isinstance(editing_sites, OptimizedEditingSites):
-            summary = editing_sites.get_summary()
-            print(f"  (Optimized lookup from {summary['total_sites']:,} total sites)")
-    
-    if not all_results:
-        print("Error: No valid results found in the input files")
-        sys.exit(1)
-    
-    # Create temporary directory for web files
-    temp_dir = tempfile.mkdtemp(prefix='dsrna_browser_')
-    
-    try:
-        # Create HTML page
-        html_path = create_html_page(all_results, temp_dir, has_editing=bool(editing_sites))
-        
-        # Change to temp directory
-        os.chdir(temp_dir)
-        
-        # Start web server
-        with socketserver.TCPServer(("", args.port), CORSHTTPRequestHandler) as httpd:
-            print(f"\nServer running at http://localhost:{args.port}/")
-            print(f"Serving files from: {temp_dir}")
-            print("\nPress Ctrl+C to stop the server")
-            
-            # Open browser if requested
-            if not args.no_browser:
-                webbrowser.open(f'http://localhost:{args.port}/')
-            
-            try:
-                httpd.serve_forever()
-            except KeyboardInterrupt:
-                print("\nServer stopped.")
-    
-    finally:
-        # Cleanup temp directory
-        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # Set up handler with data
+    DSRNARequestHandler.df = all_df
+    DSRNARequestHandler.editing_sites = editing_sites
+    DSRNARequestHandler.html_content = create_html_page(has_editing=bool(editing_sites))
+
+    # Start server
+    with socketserver.TCPServer(("", args.port), DSRNARequestHandler) as httpd:
+        print(f"\nBrowser: http://localhost:{args.port}/")
+        print("Press Ctrl+C to stop")
+
+        if not args.no_browser:
+            webbrowser.open(f'http://localhost:{args.port}/')
+
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nStopped.")
+
 
 if __name__ == '__main__':
     main()

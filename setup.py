@@ -4,7 +4,7 @@ import platform
 from setuptools import setup, find_packages
 
 # Version information
-__version__ = '0.4.6'
+__version__ = '0.4.7'
 
 def get_platform_binary():
     """Determine which pre-compiled einverted binary to use"""
@@ -94,6 +94,8 @@ setup(
         'dsrnascan': [
             'tools/*',
             'tools/platform_binaries/*',
+            'models/stability_rf_depth5/*',
+            'models/probing_rf/*',
         ],
     },
     include_package_data=True,
@@ -121,6 +123,7 @@ setup(
         'psutil>=5.8',
     ],
     extras_require={
+        'scoring': ['ydf>=0.9.0', 'scikit-learn>=1.0'],
         'mpi': ['mpi4py>=3.0', 'parasail>=1.2'],
         'dev': [
             'pytest>=6.0',
