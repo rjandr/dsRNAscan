@@ -1,6 +1,6 @@
 # dsRNAscan
 
-[![CI Tests](https://github.com/Bass-Lab/dsRNAscan/actions/workflows/ci-simple.yml/badge.svg)](https://github.com/Bass-Lab/dsRNAscan/actions/workflows/ci-simple.yml)
+[![CI Tests](https://github.com/rjandr/dsRNAscan/actions/workflows/ci-simple.yml/badge.svg)](https://github.com/rjandr/dsRNAscan/actions/workflows/ci-simple.yml)
 [![Python](https://img.shields.io/badge/Python-3.8%2B%20(Linux)%20|%203.9%2B%20(macOS)-blue.svg)](https://www.python.org/downloads/)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20|%20macOS-green.svg)](https://github.com/Bass-Lab/dsRNAscan)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
