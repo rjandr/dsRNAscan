@@ -4,6 +4,10 @@ include requirements.txt
 recursive-include dsrnascan/tools *
 recursive-include dsrnascan/models *
 
+prune overlap_analyzer
+prune .github
+
 global-exclude *.pyc
 global-exclude __pycache__
 global-exclude .DS_Store
+global-exclude *.parquet

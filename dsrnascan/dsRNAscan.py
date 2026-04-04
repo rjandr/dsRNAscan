@@ -4,7 +4,7 @@ dsRNAscan - A tool for genome-wide prediction of double-stranded RNA structures
 Copyright (C) 2024 Bass Lab
 """
 
-__version__ = '0.4.8'
+__version__ = '0.4.9'
 __author__ = 'Bass Lab'
 
 import os
@@ -980,6 +980,11 @@ class ChunkedDsRNAProcessor:
         # Calculate chunk boundaries
         chunk_end_pos = min(start_pos + self.chunk_size * step_size, seq_len)
         
+        # If sequence is shorter than window, use the full sequence as one window
+        if seq_len < window_size:
+            chunk_end_pos = start_pos + 1  # Just one iteration
+            window_size = seq_len
+
         for start in range(start_pos, chunk_end_pos, step_size):
             end = start + window_size
             if end > seq_len:

@@ -1,48 +1,19 @@
-# Byte-compiled / optimized / DLL files
+# Byte-compiled / optimized
 __pycache__/
 *.py[cod]
 *$py.class
 
-# C extensions
-*.so
-
 # Distribution / packaging
-.Python
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
-MANIFEST
 
-# PyInstaller
-*.manifest
-*.spec
-
-# Unit test / coverage reports
+# Unit test / coverage
 htmlcov/
 .tox/
-.nox/
 .coverage
 .coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
 .pytest_cache/
 
 # Environments
@@ -50,40 +21,30 @@ coverage.xml
 .venv
 env/
 venv/
-ENV/
-env.bak/
-venv.bak/
 
 # IDEs
 .idea/
 .vscode/
 *.swp
-*.swo
 *~
 
 # OS
 .DS_Store
-Thumbs.db
 
-# dsRNAscan specific
+# dsRNAscan outputs
 *.dsRNApredictions.bp
 *_merged_results.txt
 *_ein_results.txt
-test_sequence.fa
-*.test_chr.*
-EMBOSS-6.6.0/
-EMBOSS-6.6.0.tar.gz
+dsrnascan_*/
+
+# EMBOSS (no longer needed, binaries are bundled)
+EMBOSS-*/
+EMBOSS-*.tar.gz
 emboss_install/
 
-# Einverted binaries (keep only generic one)
-dsrnascan/tools/einverted_*
-dsrnascan/tools/acd/
-
-# Temporary files
+# Temporary / logs
 *.tmp
-*.temp
 *.log
 
-# pypirc file
+# Credentials
 .pypirc
-pypyirc.template
