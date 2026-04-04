@@ -121,6 +121,7 @@ setup(
         'pandas>=1.1',
         'ViennaRNA>=2.4',
         'psutil>=5.8',
+        'tqdm>=4.0',
     ],
     extras_require={
         'scoring': ['ydf>=0.9.0', 'scikit-learn>=1.0'],
