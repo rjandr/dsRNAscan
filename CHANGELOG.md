@@ -2,6 +2,20 @@
 
 All notable changes to dsRNAscan will be documented in this file.
 
+## [0.5.1] - 2026-07-02
+
+### Changed
+- BEDPE is now the default output format (`--format bedpe|gff3|both`)
+- `--min` and `--max` renamed to `--min_len` and `--max_len` to avoid confusion with `--min_bp`
+- `--max_len` now defaults to window size (previously hardcoded 10000)
+- `--eliminate-nested` replaced by `--no-eliminate-nested` (flag was previously non-functional)
+- dsRNA browser updated with cleaner interface
+
+### Fixed
+- `--min_len` / `--max_len` now correctly passed to einverted as `-minrepeat` / `-maxrepeat` (previously silently ignored)
+- `--max_span` now correctly passed through to worker processes via ProcessorArgs (previously silently ignored)
+- Removed `--algorithm` and `--clean` arguments that had no effect
+
 ## [0.5.0] - 2026-04-04
 
 ### Added

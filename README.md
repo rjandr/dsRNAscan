@@ -24,7 +24,7 @@ If ViennaRNA fails via pip, install with conda: `conda install -c bioconda vienn
 ## Usage
 
 ```bash
-# Basic scan (defaults: -w 10000 -s 150 --score 75 -c 4)
+# Basic scan (defaults: -w 10000 -s 500 --score 75 -c 4)
 dsrnascan input.fasta
 
 # Specific chromosome with 8 CPUs
@@ -45,7 +45,7 @@ dsrnascan sequence.fasta -w 5000 --min_bp 15 --paired_cutoff 60
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `-w` | 10000 | Window size (bp) |
-| `-s/--step` | 150 | Step size between windows |
+| `-s/--step` | 500 | Step size between windows |
 | `-c/--cpus` | 4 | Number of CPUs |
 | `--min_bp` | 25 | Minimum base pairs required |
 | `--score` | 75 | Minimum einverted score |
@@ -55,9 +55,13 @@ dsrnascan sequence.fasta -w 5000 --min_bp 15 --paired_cutoff 60
 | `--forward-only` | False | Forward strand only |
 | `--reverse-only` | False | Reverse strand only |
 | `--no-ml` | False | Disable ML scoring |
+| `--format` | bedpe | Output format: `bedpe`, `gff3`, or `both` |
 | `--output-dir` | Auto | Output directory |
 
-Run `dsrnascan --help` for advanced options (scoring parameters, repeat length limits, folding temperature, etc.).
+| `--min_len` | 30 | Minimum arm length of inverted repeat |
+| `--max_len` | window size | Maximum arm length of inverted repeat |
+
+Run `dsrnascan --help` for advanced options (scoring parameters, folding temperature, etc.).
 
 ## Output
 
@@ -72,9 +76,9 @@ Results are written to the output directory:
 
 **`*.bp`** - IGV arc visualization file
 
-**`*.gff3`** - GFF3 with mRNA/exon types so IGV renders the loop between arms as a thin connecting line
+**`*.bedpe`** - BEDPE format with paired coordinates (one line per dsRNA) - default output
 
-**`*.bedpe`** - BEDPE format with paired coordinates (one line per dsRNA)
+**`*.gff3`** - GFF3 with mRNA/exon types for IGV arc visualization (`--format gff3` or `--format both`)
 
 ## Browse Results
 

@@ -48,3 +48,5 @@ emboss_install/
 
 # Credentials
 .pypirc
+detailed_parallel_check.py
+setup_embedded_compile.py

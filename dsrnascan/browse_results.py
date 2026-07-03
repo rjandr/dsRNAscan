@@ -604,6 +604,8 @@ class DSRNARequestHandler(SimpleHTTPRequestHandler):
                 self._handle_single_result(result_id)
             except (ValueError, IndexError):
                 self.send_error(400, "Invalid result ID")
+        elif path == '/api/download':
+            self._handle_download(params)
         else:
             self.send_error(404)
 
@@ -618,17 +620,67 @@ class DSRNARequestHandler(SimpleHTTPRequestHandler):
             'has_editing': self.__class__.editing_sites is not None
         })
 
-    def _handle_results(self, params):
+    def _get_filtered_df(self, params):
+        """Apply all filters and return filtered DataFrame"""
         df = self.__class__.df
 
-        # Filter
+        # Search: supports "chr:start-end", chromosome name, or row index
+        search = params.get('search', [None])[0]
+        if search:
+            import re
+            # Try coordinate format: chr:start-end
+            coord_match = re.match(r'^(.+?):(\d+)-(\d+)$', search.replace(',', ''))
+            if coord_match:
+                s_chr, s_start, s_end = coord_match.group(1), int(coord_match.group(2)), int(coord_match.group(3))
+                df = df[(df['Chromosome'] == s_chr) &
+                        (df['i_start'] <= s_end) & (df['j_end'] >= s_start)]
+            elif search.isdigit():
+                # Row index
+                idx = int(search)
+                if idx in df.index:
+                    df = df.loc[[idx]]
+                else:
+                    df = df.iloc[0:0]  # empty
+            else:
+                # Chromosome name match (partial)
+                df = df[df['Chromosome'].str.contains(search, case=False, na=False)]
+
         chrom = params.get('chromosome', [None])[0]
         strand = params.get('strand', [None])[0]
         if chrom:
             df = df[df['Chromosome'] == chrom]
         if strand:
             df = df[df['Strand'] == strand]
+        if params.get('likely_edited', [None])[0] == '1' and 'likely_edited' in df.columns:
+            df = df[df['likely_edited'].astype(str).str.strip().str.lower() == 'yes']
+        if params.get('likely_forms', [None])[0] == '1' and 'likely_forms' in df.columns:
+            df = df[df['likely_forms'].astype(str).str.strip().str.lower() == 'yes']
 
+        # Column-level numeric filters (col_min, col_max)
+        filter_map = {
+            'score': 'Score', 'dG': 'dG(kcal/mol)', 'base_pairs': 'base_pairs',
+            'percent_paired': 'percent_paired', 'longest_helix': 'longest_helix',
+            'loop': None,
+        }
+        for key, col in filter_map.items():
+            min_val = params.get(f'{key}_min', [None])[0]
+            max_val = params.get(f'{key}_max', [None])[0]
+            if key == 'loop':
+                if min_val is not None or max_val is not None:
+                    loop_col = df['j_start'] - df['i_end']
+                    if min_val is not None:
+                        df = df[loop_col >= float(min_val)]
+                    if max_val is not None:
+                        df = df[loop_col <= float(max_val)]
+            elif col and col in df.columns:
+                if min_val is not None:
+                    df = df[df[col].astype(float) >= float(min_val)]
+                if max_val is not None:
+                    df = df[df[col].astype(float) <= float(max_val)]
+        return df
+
+    def _handle_results(self, params):
+        df = self._get_filtered_df(params)
         total = len(df)
 
         # Sort
@@ -637,7 +689,9 @@ class DSRNARequestHandler(SimpleHTTPRequestHandler):
         col_map = {
             'score': 'Score', 'dG': 'dG(kcal/mol)', 'percent_paired': 'percent_paired',
             'longest_helix': 'longest_helix', 'i_start': 'i_start', 'base_pairs': 'base_pairs',
-            'Score': 'Score', 'dG(kcal/mol)': 'dG(kcal/mol)'
+            'Score': 'Score', 'dG(kcal/mol)': 'dG(kcal/mol)',
+            'stability_model_score': 'stability_model_score',
+            'probing_model_score': 'probing_model_score'
         }
         actual_col = col_map.get(sort_col, 'Score')
         if actual_col in df.columns:
@@ -686,6 +740,20 @@ class DSRNARequestHandler(SimpleHTTPRequestHandler):
             'results': results
         })
 
+    def _handle_download(self, params):
+        """Download filtered results as TSV, applying the same filters as the table view"""
+        # Reuse _handle_results filtering logic by extracting filtered df
+        df = self._get_filtered_df(params)
+
+        tsv = df.to_csv(sep='\t', index=False)
+        body = tsv.encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/tab-separated-values')
+        self.send_header('Content-Disposition', 'attachment; filename="dsrnascan_filtered.tsv"')
+        self.send_header('Content-Length', len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _handle_single_result(self, result_id):
         df = self.__class__.df
         if result_id not in df.index:
@@ -716,10 +784,14 @@ class DSRNARequestHandler(SimpleHTTPRequestHandler):
             if col in row and pd.notna(row[col]):
                 result[col] = int(row[col])
 
-        # Add ML scores
+        # Add ML scores and confidence labels
         for col in ['stability_model_score', 'probing_model_score']:
             if col in row and pd.notna(row[col]):
                 result[col] = float(row[col])
+        if 'likely_edited' in row:
+            result['likely_edited'] = str(row['likely_edited']).strip().lower() == 'yes'
+        if 'likely_forms' in row:
+            result['likely_forms'] = str(row['likely_forms']).strip().lower() == 'yes'
 
         # Compute editing sites on demand
         editing_sites = self.__class__.editing_sites
@@ -790,6 +862,7 @@ def create_html_page(has_editing=False):
         <div class="subtitle" id="summary-text">Loading...</div>
     </div>
     <div class="controls">
+        <input type="text" id="search-box" placeholder="Search: chr:start-end or ID" style="width:200px;padding:4px 8px;font-size:13px;">
         <label>Chr:</label>
         <select id="chrom-filter"><option value="">All</option></select>
         <label>Strand:</label>
@@ -806,11 +879,16 @@ def create_html_page(has_editing=False):
             <option value="longest_helix">Helix</option>
             <option value="base_pairs">Base Pairs</option>
             <option value="i_start">Position</option>
+            <option value="stability_model_score">Stability Model</option>
+            <option value="probing_model_score">Probing Model</option>
         </select>
         <select id="sort-dir">
             <option value="desc">Desc</option>
             <option value="asc">Asc</option>
         </select>
+        <label style="margin-left:12px;"><input type="checkbox" id="filter-edited"> Likely Edited</label>
+        <label><input type="checkbox" id="filter-forms"> Likely Forms</label>
+        <button id="download-btn" style="margin-left:12px;padding:4px 10px;cursor:pointer;">Download TSV</button>
         <div class="total" id="total-text"></div>
     </div>
     <div class="main">
@@ -818,13 +896,29 @@ def create_html_page(has_editing=False):
             <table>
                 <thead><tr>
                     <th data-col="i_start">Location</th>
+                    <th>Strand</th>
                     <th data-col="score">Score</th>
                     <th data-col="dG">dG</th>
                     <th data-col="base_pairs">BP</th>
                     <th data-col="percent_paired">%Paired</th>
                     <th data-col="longest_helix">Helix</th>
                     <th>Arms</th>
-                </tr></thead>
+                    <th>Loop</th>
+                    <th data-col="stability_model_score">Stability</th>
+                    <th data-col="probing_model_score">Probing</th>
+                </tr>
+                <tr id="filter-row" style="background:#f0f0f0;">
+                    <td></td><td></td>
+                    <td><input type="number" class="col-filter" data-col="score" data-type="min" placeholder="min" style="width:40px;font-size:11px;"></td>
+                    <td><input type="number" class="col-filter" data-col="dG" data-type="max" placeholder="max" style="width:45px;font-size:11px;" step="0.1"></td>
+                    <td><input type="number" class="col-filter" data-col="base_pairs" data-type="min" placeholder="min" style="width:35px;font-size:11px;"></td>
+                    <td><input type="number" class="col-filter" data-col="percent_paired" data-type="min" placeholder="min" style="width:35px;font-size:11px;"></td>
+                    <td><input type="number" class="col-filter" data-col="longest_helix" data-type="min" placeholder="min" style="width:35px;font-size:11px;"></td>
+                    <td></td>
+                    <td><input type="number" class="col-filter" data-col="loop" data-type="max" placeholder="max" style="width:45px;font-size:11px;"></td>
+                    <td></td><td></td>
+                </tr>
+                </thead>
                 <tbody id="results-body"></tbody>
             </table>
             <div class="pagination">
@@ -842,7 +936,7 @@ def create_html_page(has_editing=False):
         </div>
     </div>
 <script>
-let state = { page: 0, pageSize: 50, chromosome: '', strand: '', sort: 'score', sortDir: 'desc', total: 0 };
+let state = { page: 0, pageSize: 50, chromosome: '', strand: '', sort: 'score', sortDir: 'desc', total: 0, likelyEdited: false, likelyForms: false, filters: {}, search: '' };
 
 async function fetchJSON(url) { return (await fetch(url)).json(); }
 
@@ -867,6 +961,12 @@ async function loadResults() {
     });
     if (state.chromosome) params.set('chromosome', state.chromosome);
     if (state.strand) params.set('strand', state.strand);
+    if (state.likelyEdited) params.set('likely_edited', '1');
+    if (state.likelyForms) params.set('likely_forms', '1');
+    if (state.search) params.set('search', state.search);
+    for (const [key, val] of Object.entries(state.filters)) {
+        params.set(key, val);
+    }
 
     const data = await fetchJSON('/api/results?' + params);
     state.total = data.total;
@@ -882,10 +982,27 @@ async function loadResults() {
     data.results.forEach(r => {
         const tr = document.createElement('tr');
         tr.dataset.id = r.id;
-        tr.innerHTML = `<td>${r.chromosome}:${r.i_start.toLocaleString()}-${r.j_end.toLocaleString()} (${r.strand})</td>
+        const loop = r.j_start - r.i_end;
+        function scoreColor(val, threshold) {
+            if (val == null) return 'color:#ccc';
+            if (val >= threshold) {
+                const t = Math.min((val - threshold) / (1 - threshold), 1);
+                const g = Math.round(100 + t * 80);
+                return 'color:rgb(0,' + g + ',0);font-weight:bold';
+            } else {
+                return 'color:#ccc';
+            }
+        }
+        const stabVal = r.stability_model_score != null ? r.stability_model_score.toFixed(3) : '-';
+        const probVal = r.probing_model_score != null ? r.probing_model_score.toFixed(3) : '-';
+        const stabStyle = scoreColor(r.stability_model_score, 0.247);
+        const probStyle = scoreColor(r.probing_model_score, 0.032);
+        tr.innerHTML = `<td>${r.chromosome}:${r.i_start.toLocaleString()}-${r.j_end.toLocaleString()}</td>
+            <td>${r.strand}</td>
             <td>${r.score}</td><td>${r.dG.toFixed(1)}</td><td>${r.base_pairs}</td>
             <td>${r.percent_paired.toFixed(1)}%</td><td>${r.longest_helix}</td>
-            <td>${r.i_len}/${r.j_len}</td>`;
+            <td>${r.i_len}/${r.j_len}</td><td>${loop.toLocaleString()}</td>
+            <td style="${stabStyle}">${stabVal}</td><td style="${probStyle}">${probVal}</td>`;
         tr.addEventListener('click', () => selectResult(r.id, tr));
         tbody.appendChild(tr);
     });
@@ -903,21 +1020,29 @@ async function selectResult(id, tr) {
 function showInfo(d) {
     const bar = document.getElementById('info-bar');
     bar.style.display = 'block';
-    const span = d.j_end - d.i_start + 1;
     let html = `<div><span class="metric-label">Location:</span> <span class="metric-value">${d.chromosome}:${d.i_start.toLocaleString()}-${d.j_end.toLocaleString()} (${d.strand})</span></div>
         <div><span class="metric-label">Energy:</span> <span class="metric-value">${d.dG.toFixed(1)} kcal/mol</span></div>
         <div><span class="metric-label">Score:</span> <span class="metric-value">${d.score}</span></div>
         <div><span class="metric-label">Base Pairs:</span> <span class="metric-value">${d.base_pairs} (${d.percent_paired.toFixed(1)}%)</span></div>
-        <div><span class="metric-label">Helix:</span> <span class="metric-value">${d.longest_helix} bp</span></div>
-        <div><span class="metric-label">Span:</span> <span class="metric-value">${span.toLocaleString()} bp</span></div>`;
+        <div><span class="metric-label">Helix:</span> <span class="metric-value">${d.longest_helix} bp</span></div>`;
     if (d.stability_model_score != null) {
-        const editBadge = d.likely_edited ? ' <span style="background:#27ae60;color:#fff;padding:1px 6px;border-radius:3px;font-size:11px;">Likely Edited</span>' : '';
-        html += `<div><span class="metric-label">Stability:</span> <span class="metric-value">${d.stability_model_score.toFixed(3)}</span>${editBadge}</div>`;
+        if (d.likely_edited) {
+            html += '<div><span class="metric-label">Stability Model:</span> <span class="metric-value">' + d.stability_model_score.toFixed(3) + '</span> <span style="color:#27ae60;font-size:12px;font-weight:bold;">high confidence editing</span></div>';
+        } else {
+            html += '<div><span class="metric-label">Stability Model:</span> <span class="metric-value">' + d.stability_model_score.toFixed(3) + '</span> <span style="color:#e74c3c;font-size:12px;">low confidence editing</span></div>';
+        }
     }
     if (d.probing_model_score != null) {
-        const formBadge = d.likely_forms ? ' <span style="background:#2980b9;color:#fff;padding:1px 6px;border-radius:3px;font-size:11px;">Likely Forms</span>' : '';
-        html += `<div><span class="metric-label">Probing:</span> <span class="metric-value">${d.probing_model_score.toFixed(3)}</span>${formBadge}</div>`;
+        if (d.likely_forms) {
+            html += '<div><span class="metric-label">Probing Model:</span> <span class="metric-value">' + d.probing_model_score.toFixed(3) + '</span> <span style="color:#2980b9;font-size:12px;font-weight:bold;">high confidence formation</span></div>';
+        } else {
+            html += '<div><span class="metric-label">Probing Model:</span> <span class="metric-value">' + d.probing_model_score.toFixed(3) + '</span> <span style="color:#e74c3c;font-size:12px;">low confidence formation</span></div>';
+        }
     }
+    html += '<div style="margin-top:6px;font-size:10px;color:#888;line-height:1.4;">'
+        + 'Stability model predicts ADAR editing substrate likelihood from structural features (threshold: 0.247). '
+        + 'Probing model predicts in vivo structure formation from RNA probing data (threshold: 0.032). '
+        + 'Thresholds derived from human editing sites and may not apply to other organisms.</div>';
     if (d.editing_sites && d.editing_sites.length > 0) html += `<div><span class="metric-label" style="color:#27AE60">Editing Sites:</span> <span class="metric-value">${d.editing_sites.length}</span></div>`;
     document.getElementById('metrics').innerHTML = html;
 
@@ -955,11 +1080,11 @@ function showStructure(data) {
     const parts = data.structure.split('&');
     const sequence = data.i_seq + data.j_seq;
     const structure = parts[0] + parts[1];
-    const totalLen = sequence.length;
+    const maxArm = Math.max(data.i_seq.length, data.j_seq.length);
 
-    // For large structures, skip Forna rendering (sequences available in panel below)
-    if (totalLen > 500) {
-        viewer.innerHTML = `<div class="loading">Structure too large for interactive view (${totalLen} nt). Use copy buttons below.</div>`;
+    // For large structures, skip Forna rendering (sequences available via copy buttons)
+    if (maxArm > 500) {
+        viewer.innerHTML = `<div class="loading">Arms too large for interactive view (${maxArm} nt). Use copy buttons above.</div>`;
         return;
     }
 
@@ -1013,13 +1138,50 @@ function annotateEditingSites(containerId, editingSites) {
     });
 }
 
+// Column filter event listeners
+document.querySelectorAll('.col-filter').forEach(input => {
+    input.addEventListener('change', () => {
+        state.filters = {};
+        document.querySelectorAll('.col-filter').forEach(el => {
+            if (el.value !== '') {
+                const key = el.dataset.col + '_' + el.dataset.type;
+                state.filters[key] = parseFloat(el.value);
+            }
+        });
+        state.page = 0;
+        loadResults();
+    });
+});
+
+// Search box
+document.getElementById('search-box').addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+        state.search = e.target.value.trim();
+        state.page = 0;
+        loadResults();
+    }
+});
+
 // Event listeners
 document.getElementById('chrom-filter').addEventListener('change', e => { state.chromosome = e.target.value; state.page = 0; loadResults(); });
 document.getElementById('strand-filter').addEventListener('change', e => { state.strand = e.target.value; state.page = 0; loadResults(); });
 document.getElementById('sort-col').addEventListener('change', e => { state.sort = e.target.value; state.page = 0; loadResults(); });
 document.getElementById('sort-dir').addEventListener('change', e => { state.sortDir = e.target.value; state.page = 0; loadResults(); });
+document.getElementById('filter-edited').addEventListener('change', e => { state.likelyEdited = e.target.checked; state.page = 0; loadResults(); });
+document.getElementById('filter-forms').addEventListener('change', e => { state.likelyForms = e.target.checked; state.page = 0; loadResults(); });
 document.getElementById('prev-btn').addEventListener('click', () => { if (state.page > 0) { state.page--; loadResults(); } });
 document.getElementById('next-btn').addEventListener('click', () => { state.page++; loadResults(); });
+document.getElementById('download-btn').addEventListener('click', () => {
+    const params = new URLSearchParams();
+    if (state.chromosome) params.set('chromosome', state.chromosome);
+    if (state.strand) params.set('strand', state.strand);
+    if (state.likelyEdited) params.set('likely_edited', '1');
+    if (state.likelyForms) params.set('likely_forms', '1');
+    for (const [key, val] of Object.entries(state.filters)) {
+        params.set(key, val);
+    }
+    window.location.href = '/api/download?' + params;
+});
 
 // Column header sorting
 document.querySelectorAll('th[data-col]').forEach(th => {

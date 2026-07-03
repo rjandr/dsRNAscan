@@ -4,7 +4,7 @@ dsRNAscan - A tool for genome-wide prediction of double-stranded RNA structures
 Copyright (C) 2024 Bass Lab
 """
 
-__version__ = '0.5.0'
+__version__ = '0.5.1'
 __author__ = 'Bass Lab'
 
 import os
@@ -794,14 +794,15 @@ def process_sequence_einverted(row_data):
     # Run einverted
     stdin_input = f">{row['seq_hash']}\n{row['sequence']}\n"
     
-    # CRITICAL: Set maxrepeat to allow searching the entire window
-    # Use max_span if specified and larger than window, otherwise use window size
-    window_size = len(row['sequence'])  # Use actual sequence length as max
+    # Set maxrepeat: cap at window size (or max_span if specified), then apply user --max
+    window_size = len(row['sequence'])
     if hasattr(args, 'max_span') and args.max_span is not None:
-        max_repeat = max(window_size, args.max_span)
+        window_limit = max(window_size, args.max_span)
     else:
-        max_repeat = window_size
-    
+        window_limit = window_size
+    max_repeat = min(window_limit, args.max_len) if args.max_len is not None else window_limit
+    min_repeat = args.min_len
+
     cmd = [
         einverted_bin,
         "-sequence", "stdin",
@@ -809,7 +810,8 @@ def process_sequence_einverted(row_data):
         "-threshold", str(args.score),
         "-match", str(args.match),
         "-mismatch", str(args.mismatch),
-        "-maxrepeat", str(max_repeat),  # Set to window size to search entire window
+        "-minrepeat", str(min_repeat),
+        "-maxrepeat", str(max_repeat),
         "-outfile", "stdout",
         "-outseq", "/dev/null"
     ]
@@ -1592,8 +1594,9 @@ class ChunkedDsRNAProcessor:
                 self.log(f"\nRemoved {deduplicated_count} duplicate entries (identical coordinates and sequences)")
             
             # Eliminate nested dsRNAs across all results
-            self.log("\nEliminating nested dsRNAs...")
-            all_results_df = self.eliminate_nested_dsrnas(all_results_df)
+            if not getattr(args, 'no_eliminate_nested', False):
+                self.log("\nEliminating nested dsRNAs...")
+                all_results_df = self.eliminate_nested_dsrnas(all_results_df)
             
             # Apply final filters - VECTORIZED for better performance
             # Vectorized calculation of percent_paired
@@ -1690,8 +1693,9 @@ class ProcessorArgs:
         self.cpus = original_args.cpus
         self.score = original_args.score
         self.min_bp = original_args.min_bp  # Add min_bp parameter
-        self.min = original_args.min  # Add min parameter
-        self.max = original_args.max  # Add max parameter
+        self.min_len = original_args.min_len
+        self.max_len = original_args.max_len
+        self.max_span = original_args.max_span
         self.paired_cutoff = original_args.paired_cutoff
         self.gap = original_args.gaps  # Note: gaps -> gap
         self.gaps = original_args.gaps
@@ -1875,11 +1879,16 @@ def run_dataframe_approach(args):
         bp_reverse = output_file.replace('.txt', '.reverse.bp')
         generate_bp_file(output_file, bp_forward, strand_filter='+')
         generate_bp_file(output_file, bp_reverse, strand_filter='-')
-        gff3_file = output_file.replace('.txt', '.gff3')
-        generate_gff3_file(output_file, gff3_file)
-        bedpe_file = output_file.replace('.txt', '.bedpe')
-        generate_bedpe_file(output_file, bedpe_file)
-    
+        fmt = getattr(args, 'format', 'bedpe')
+        if fmt in ('bedpe', 'both'):
+            bedpe_file = output_file.replace('.txt', '.bedpe')
+            generate_bedpe_file(output_file, bedpe_file)
+        if fmt in ('gff3', 'both'):
+            gff3_file = output_file.replace('.txt', '.gff3')
+            generate_gff3_file(output_file, gff3_file)
+
+    print(f"\nBrowse results with: dsrna-browse {output_dir}")
+
     return len(results)
 
 def main():
@@ -1903,10 +1912,10 @@ def main():
                         help='Minimum number of base pairs required (overrides --score if set); Default = 25')
     parser.add_argument('--score', type=int, default=None,
                         help='Minimum score threshold for inverted repeat (deprecated, use --min_bp); Default = 75')
-    parser.add_argument('--min', type=int, default=30,
-                        help='Minimum length of inverted repeat; Default = 30')
-    parser.add_argument('--max', type=int, default=10000,
-                        help='Max length of inverted repeat; Default = 10000')
+    parser.add_argument('--min_len', type=int, default=30,
+                        help='Minimum arm length of inverted repeat; Default = 30')
+    parser.add_argument('--max_len', type=int, default=None,
+                        help='Maximum arm length of inverted repeat; Default = window size')
     parser.add_argument('--gaps', type=int, default=12,
                         help='Gap penalty')
     parser.add_argument('--start', type=int, default=0,
@@ -1919,8 +1928,7 @@ def main():
             help='Match score')
     parser.add_argument('--paired_cutoff', type=int, default=70,
                         help='Cutoff to ignore sturctures with low percentage of pairs; Default <70')
-    parser.add_argument('--algorithm', type=str, default="einverted",
-            help='Inverted repeat finding algorithm (einverted or iupacpal)')
+    # --algorithm: only einverted is supported; iupacpal not implemented
     parser.add_argument('--forward-only', action='store_true', default=False,
                         help='Process forward strand only (default: both strands)')
     parser.add_argument('--reverse-only', action='store_true', default=False,
@@ -1931,16 +1939,17 @@ def main():
                         help='Only scan this specific sequence')
     parser.add_argument('-c', '--cpus', type=int, default=4,
                         help='Number of cpus to use; Default = 4')
-    parser.add_argument('--clean', action='store_false', default=True,
-                    help='Clean up temporary files after processing')
+    # --clean: temp file cleanup not yet implemented
     parser.add_argument('--output-dir', type=str, default=None,
                         help='Output directory (default: dsrnascan_YYYYMMDD_HHMMSS)')
     parser.add_argument('--chunk-size', type=int, default=10000,
                         help='Windows per chunk for DataFrame approach (default: 10000)')
-    parser.add_argument('--eliminate-nested', action='store_true', default=True,
-                        help='Remove nested dsRNAs (default: True)')
+    parser.add_argument('--no-eliminate-nested', action='store_true', default=False,
+                        help='Disable removal of nested dsRNAs (default: removal enabled)')
     parser.add_argument('--no-ml', action='store_true', default=False,
                         help='Disable ML scoring of predictions (default: scoring enabled if ydf/sklearn installed)')
+    parser.add_argument('--format', type=str, default='bedpe', choices=['bedpe', 'gff3', 'both'],
+                        help='Output format: bedpe, gff3, or both (default: bedpe)')
 
     args = parser.parse_args()
     
@@ -1990,10 +1999,10 @@ def main():
     if args.step > args.w:
         msg = "Warning: Step size is larger than window size. This may cause gaps in coverage."
         print(msg)
-    if args.min <= 0:
-        parser.error("Minimum inverted repeat length must be greater than 0")
-    if args.max < args.min:
-        parser.error("Maximum inverted repeat length must be greater than or equal to minimum length")
+    if args.min_len <= 0:
+        parser.error("--min_len must be greater than 0")
+    if args.max_len is not None and args.max_len < args.min_len:
+        parser.error("--max_len must be greater than or equal to --min_len")
     if args.cpus <= 0:
         parser.error("Number of CPUs must be greater than 0")
     if args.paired_cutoff < 0 or args.paired_cutoff > 100:

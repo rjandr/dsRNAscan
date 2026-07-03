@@ -209,7 +209,7 @@ def score_results(results_df, models=None):
             try:
                 scores = score_stability(features_df)
                 results_df = results_df.copy()
-                results_df['stability_model_score'] = scores
+                results_df['stability_model_score'] = np.round(scores, 3)
                 n_high = (scores >= STABILITY_YOUDEN_THRESHOLD).sum()
                 logger.info(f"Stability model: {n_high}/{n} predictions above threshold ({n_high/n*100:.1f}%)")
             except Exception as e:
@@ -223,7 +223,7 @@ def score_results(results_df, models=None):
                 scores = score_probing(features_df)
                 if 'stability_model_score' not in results_df.columns:
                     results_df = results_df.copy()
-                results_df['probing_model_score'] = scores
+                results_df['probing_model_score'] = np.round(scores, 3)
                 n_high = (scores >= PROBING_YOUDEN_THRESHOLD_RAW).sum()
                 logger.info(f"Probing model: {n_high}/{n} predictions above threshold ({n_high/n*100:.1f}%)")
             except Exception as e:
