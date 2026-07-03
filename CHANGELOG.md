@@ -2,6 +2,12 @@
 
 All notable changes to dsRNAscan will be documented in this file.
 
+## [0.5.2] - 2026-07-03
+
+### Fixed
+- `--min_len` and `--max_len` now correctly filter by arm length post-hoc (einverted's `-maxrepeat` flag controls total span, not arm length, and has no `-minrepeat` equivalent)
+- Removed spurious `-minrepeat` flag from einverted command (was silently ignored)
+
 ## [0.5.1] - 2026-07-02
 
 ### Changed

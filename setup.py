@@ -4,7 +4,7 @@ import platform
 from setuptools import setup, find_packages
 
 # Version information
-__version__ = '0.5.1'
+__version__ = '0.5.2'
 
 def get_platform_binary():
     """Determine which pre-compiled einverted binary to use"""

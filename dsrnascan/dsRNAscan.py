@@ -4,7 +4,7 @@ dsRNAscan - A tool for genome-wide prediction of double-stranded RNA structures
 Copyright (C) 2024 Bass Lab
 """
 
-__version__ = '0.5.1'
+__version__ = '0.5.2'
 __author__ = 'Bass Lab'
 
 import os
@@ -794,14 +794,14 @@ def process_sequence_einverted(row_data):
     # Run einverted
     stdin_input = f">{row['seq_hash']}\n{row['sequence']}\n"
     
-    # Set maxrepeat: cap at window size (or max_span if specified), then apply user --max
+    # -maxrepeat is the total span (start of arm1 to end of arm2), not arm length.
+    # Set it to window size so einverted searches the entire window.
+    # --min_len/--max_len (arm length) have no einverted equivalent; filtered post-hoc.
     window_size = len(row['sequence'])
     if hasattr(args, 'max_span') and args.max_span is not None:
-        window_limit = max(window_size, args.max_span)
+        max_repeat = max(window_size, args.max_span)
     else:
-        window_limit = window_size
-    max_repeat = min(window_limit, args.max_len) if args.max_len is not None else window_limit
-    min_repeat = args.min_len
+        max_repeat = window_size
 
     cmd = [
         einverted_bin,
@@ -810,7 +810,6 @@ def process_sequence_einverted(row_data):
         "-threshold", str(args.score),
         "-match", str(args.match),
         "-mismatch", str(args.mismatch),
-        "-minrepeat", str(min_repeat),
         "-maxrepeat", str(max_repeat),
         "-outfile", "stdout",
         "-outseq", "/dev/null"
@@ -1620,6 +1619,14 @@ class ChunkedDsRNAProcessor:
             # Only apply min_bp filter if it's > 0
             if args.min_bp > 0:
                 filter_mask = filter_mask & (all_results_df['base_pairs'] >= args.min_bp)
+
+            # Apply arm length filters (-minrepeat/-maxrepeat in einverted may be ignored
+            # by the bundled binary, so enforce here as well)
+            arm_len = all_results_df['i_seq'].str.len()
+            if args.min_len > 0:
+                filter_mask = filter_mask & (arm_len >= args.min_len)
+            if args.max_len is not None:
+                filter_mask = filter_mask & (arm_len <= args.max_len)
 
             all_results_df = all_results_df[filter_mask]
             
