@@ -4,7 +4,7 @@ dsRNAscan - A tool for genome-wide prediction of double-stranded RNA structures
 Copyright (C) 2024 Bass Lab
 """
 
-__version__ = '0.5.2'
+__version__ = '0.5.3'
 __author__ = 'Bass Lab'
 
 import os
@@ -796,7 +796,6 @@ def process_sequence_einverted(row_data):
     
     # -maxrepeat is the total span (start of arm1 to end of arm2), not arm length.
     # Set it to window size so einverted searches the entire window.
-    # --min_len/--max_len (arm length) have no einverted equivalent; filtered post-hoc.
     window_size = len(row['sequence'])
     if hasattr(args, 'max_span') and args.max_span is not None:
         max_repeat = max(window_size, args.max_span)
@@ -1620,14 +1619,6 @@ class ChunkedDsRNAProcessor:
             if args.min_bp > 0:
                 filter_mask = filter_mask & (all_results_df['base_pairs'] >= args.min_bp)
 
-            # Apply arm length filters (-minrepeat/-maxrepeat in einverted may be ignored
-            # by the bundled binary, so enforce here as well)
-            arm_len = all_results_df['i_seq'].str.len()
-            if args.min_len > 0:
-                filter_mask = filter_mask & (arm_len >= args.min_len)
-            if args.max_len is not None:
-                filter_mask = filter_mask & (arm_len <= args.max_len)
-
             all_results_df = all_results_df[filter_mask]
             
             filtered_count = initial_count - len(all_results_df)
@@ -1700,8 +1691,6 @@ class ProcessorArgs:
         self.cpus = original_args.cpus
         self.score = original_args.score
         self.min_bp = original_args.min_bp  # Add min_bp parameter
-        self.min_len = original_args.min_len
-        self.max_len = original_args.max_len
         self.max_span = original_args.max_span
         self.paired_cutoff = original_args.paired_cutoff
         self.gap = original_args.gaps  # Note: gaps -> gap
@@ -1718,6 +1707,7 @@ class ProcessorArgs:
         self.reverse_only = original_args.reverse_only
         self.output_dir = original_args.output_dir
         self.output_label = original_args.output_label
+        self.no_eliminate_nested = original_args.no_eliminate_nested
 
 def run_dataframe_approach(args):
     """Run the optimized DataFrame approach"""
@@ -1915,14 +1905,10 @@ def main():
                         help='Window size; default = 10000')
     parser.add_argument('--max_span', type=int, default=None,
                         help='Max span of inverted repeat; default = window size')
-    parser.add_argument('--min_bp', type=int, default=25,
+    parser.add_argument('--min_bp', type=int, default=None,
                         help='Minimum number of base pairs required (overrides --score if set); Default = 25')
     parser.add_argument('--score', type=int, default=None,
                         help='Minimum score threshold for inverted repeat (deprecated, use --min_bp); Default = 75')
-    parser.add_argument('--min_len', type=int, default=30,
-                        help='Minimum arm length of inverted repeat; Default = 30')
-    parser.add_argument('--max_len', type=int, default=None,
-                        help='Maximum arm length of inverted repeat; Default = window size')
     parser.add_argument('--gaps', type=int, default=12,
                         help='Gap penalty')
     parser.add_argument('--start', type=int, default=0,
@@ -2006,10 +1992,6 @@ def main():
     if args.step > args.w:
         msg = "Warning: Step size is larger than window size. This may cause gaps in coverage."
         print(msg)
-    if args.min_len <= 0:
-        parser.error("--min_len must be greater than 0")
-    if args.max_len is not None and args.max_len < args.min_len:
-        parser.error("--max_len must be greater than or equal to --min_len")
     if args.cpus <= 0:
         parser.error("Number of CPUs must be greater than 0")
     if args.paired_cutoff < 0 or args.paired_cutoff > 100:

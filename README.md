@@ -58,9 +58,6 @@ dsrnascan sequence.fasta -w 5000 --min_bp 15 --paired_cutoff 60
 | `--format` | bedpe | Output format: `bedpe`, `gff3`, or `both` |
 | `--output-dir` | Auto | Output directory |
 
-| `--min_len` | 30 | Minimum arm length of inverted repeat |
-| `--max_len` | window size | Maximum arm length of inverted repeat |
-
 Run `dsrnascan --help` for advanced options (scoring parameters, folding temperature, etc.).
 
 ## Output

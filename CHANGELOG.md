@@ -2,6 +2,15 @@
 
 All notable changes to dsRNAscan will be documented in this file.
 
+## [0.5.3] - 2026-07-03
+
+### Removed
+- `--min_len` and `--max_len` arm length filters (introduced in 0.5.1). Post-hoc filtering saved no compute over filtering the output directly, and the default `--min_len` silently interacted with `--min_bp`. Filter the TSV/BEDPE output directly if arm length limits are needed.
+
+### Fixed
+- `--no-eliminate-nested` now actually disables nested dsRNA removal (flag value was never passed to worker processes via ProcessorArgs)
+- `--score`-only mode now correctly disables base-pair filtering (the `--min_bp` default of 25 previously made the score-only code path unreachable, silently applying a 25 bp floor)
+
 ## [0.5.2] - 2026-07-03
 
 ### Fixed
