@@ -4,7 +4,7 @@ dsRNAscan - A tool for genome-wide prediction of double-stranded RNA structures
 Copyright (C) 2024 Bass Lab
 """
 
-__version__ = '0.5.3'
+__version__ = '0.5.4'
 __author__ = 'Bass Lab'
 
 import os
@@ -795,10 +795,11 @@ def process_sequence_einverted(row_data):
     stdin_input = f">{row['seq_hash']}\n{row['sequence']}\n"
     
     # -maxrepeat is the total span (start of arm1 to end of arm2), not arm length.
-    # Set it to window size so einverted searches the entire window.
+    # The window is the natural ceiling (einverted only sees this window), and
+    # --max_span may restrict it further to search for shorter-span duplexes.
     window_size = len(row['sequence'])
     if hasattr(args, 'max_span') and args.max_span is not None:
-        max_repeat = max(window_size, args.max_span)
+        max_repeat = min(window_size, args.max_span)
     else:
         max_repeat = window_size
 
@@ -1304,88 +1305,85 @@ class ChunkedDsRNAProcessor:
         Remove dsRNAs that are completely contained within others.
         A dsRNA is considered nested ONLY if BOTH arms are within the corresponding arms
         of another dsRNA (i.e., using identical sequences but shorter on both sides).
-        Uses vectorized numpy operations for better performance.
+        Uses a sorted sliding-window sweep. A container's i_start must fall within
+        max_arm of the nested structure's i_start, so each structure only needs
+        comparing against a small local window of neighbours rather than all n.
+        O(n) memory - no (n, n) pairwise matrices are ever allocated.
         """
         if results_df.empty:
             return results_df
-        
+
         # Sort by chromosome, strand, and i_start
         results_df = results_df.sort_values(['chromosome', 'strand', 'i_start'])
-        
+
         # Track which indices to keep
         keep_mask = np.ones(len(results_df), dtype=bool)
         total_nested = 0
+        max_window = 0
+        # O(1) index -> position lookup (replaces O(n) index.get_loc per row)
+        pos_of = {idx: p for p, idx in enumerate(results_df.index)}
         
         # Process each chromosome-strand group
         for (chrom, strand), group in results_df.groupby(['chromosome', 'strand']):
             if len(group) <= 1:
                 continue
                 
-            # Get coordinates as numpy arrays for vectorized operations
+            # Get coordinates as numpy arrays (group is already sorted by i_start)
             group_idx = group.index.to_numpy()
             i_starts = group['i_start'].to_numpy()
             i_ends = group['i_end'].to_numpy()
             j_starts = group['j_start'].to_numpy()
             j_ends = group['j_end'].to_numpy()
-            
+
             n = len(group)
-            
-            # Create broadcasting arrays for pairwise comparison
-            # Shape: (n, 1) vs (n,) -> (n, n) comparison matrix
-            i_starts_i = i_starts[:, np.newaxis]
-            i_ends_i = i_ends[:, np.newaxis]
-            j_starts_i = j_starts[:, np.newaxis]
-            j_ends_i = j_ends[:, np.newaxis]
-            
-            # Check if a dsRNA is nested within another
-            # CRITICAL: A dsRNA is only considered nested if:
-            # - Its i-arm is within the other's i-arm (NOT j-arm)
-            # - AND its j-arm is within the other's j-arm (NOT i-arm)
-            # This preserves dsRNAs where both arms fall within just one arm of another structure
-            i_arm_nested = (
-                (i_starts >= i_starts_i) &  # current i_start >= other's i_start
-                (i_ends <= i_ends_i)         # current i_end <= other's i_end
-            )
-            
-            j_arm_nested = (
-                (j_starts >= j_starts_i) &  # current j_start >= other's j_start
-                (j_ends <= j_ends_i)         # current j_end <= other's j_end
-            )
-            
-            # A structure is nested only if BOTH arms are nested in their CORRESPONDING arms
-            is_nested = i_arm_nested & j_arm_nested
-            
-            # Set diagonal to False (element can't be nested within itself)
-            np.fill_diagonal(is_nested, False)
-            
-            # For exact duplicates (same coordinates), we need special handling
-            # Check if structures are identical (not just one within the other)
-            i_identical = (i_starts[:, np.newaxis] == i_starts) & (i_ends[:, np.newaxis] == i_ends)
-            j_identical = (j_starts[:, np.newaxis] == j_starts) & (j_ends[:, np.newaxis] == j_ends)
-            is_identical = i_identical & j_identical
-            np.fill_diagonal(is_identical, False)  # Don't compare with self
-            
-            # For identical pairs, only mark the later one as nested (keep the first occurrence)
-            # This is done by using upper triangular matrix only for identical pairs
-            is_nested_final = is_nested.copy()
-            for i in range(n):
-                for j in range(i + 1, n):  # Only check upper triangle
-                    if is_identical[i, j]:
-                        # If they're identical, mark j as nested (keep i)
-                        is_nested_final[i, j] = True
-                        is_nested_final[j, i] = False  # Don't mark i as nested
-            
-            # Find which elements are nested within any other element
-            nested_mask = is_nested_final.any(axis=0)
+
+            # A container's i_start must satisfy:
+            #   i_start[k] - max_arm <= container_i_start <= i_start[k]
+            # so only that local window of neighbours can possibly contain k.
+            max_arm = int((i_ends - i_starts).max())
+            lo = np.searchsorted(i_starts, i_starts - max_arm, side='left')
+            hi = np.searchsorted(i_starts, i_starts, side='right')
+            max_window = max(max_window, int((hi - lo).max()))
+
+            nested_mask = np.zeros(n, dtype=bool)
+            for k in range(n):
+                a, b = lo[k], hi[k]
+                if b - a <= 1:          # only itself in the window
+                    continue
+                # CRITICAL: nested only if BOTH arms are within the CORRESPONDING arms.
+                # i_start is guaranteed <= i_starts[k] by the window bounds.
+                contains = (
+                    (i_ends[a:b] >= i_ends[k]) &
+                    (j_starts[a:b] <= j_starts[k]) &
+                    (j_ends[a:b] >= j_ends[k])
+                )
+                if not contains.any():
+                    continue
+                cand = np.nonzero(contains)[0] + a
+                cand = cand[cand != k]          # a structure can't nest in itself
+                if cand.size == 0:
+                    continue
+                # For coordinate-identical pairs keep the first occurrence only
+                identical = (
+                    (i_starts[cand] == i_starts[k]) & (i_ends[cand] == i_ends[k]) &
+                    (j_starts[cand] == j_starts[k]) & (j_ends[cand] == j_ends[k])
+                )
+                if (~(identical & (cand > k))).any():
+                    nested_mask[k] = True
+
             total_nested += nested_mask.sum()
-            
+
             # Update the global keep mask
             for idx, is_nested_item in zip(group_idx, nested_mask):
                 if is_nested_item:
-                    keep_mask[results_df.index.get_loc(idx)] = False
+                    keep_mask[pos_of[idx]] = False
         
         if self.verbose and total_nested > 0:
             self.log(f"  Removed {total_nested} nested dsRNAs (both arms contained within another on same strand)")
+        if self.verbose and max_window > 5000:
+            # Sweep cost scales with local density; flag pathological loci
+            self.log(f"  Note: dense locus detected (max comparison window {max_window:,}); "
+                     f"nested elimination may be slow. Consider --no-eliminate-nested.")
         
         return results_df[keep_mask]
     

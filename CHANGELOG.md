@@ -2,6 +2,17 @@
 
 All notable changes to dsRNAscan will be documented in this file.
 
+## [0.5.4] - 2026-07-03
+
+### Fixed
+- `--max_span` can now restrict the search span below the window size. It previously used `max(window_size, max_span)`, so any value below `-w` was silently discarded and the flag was a no-op for its main use case (short-duplex searches). Now uses `min(window_size, max_span)`. **Results from earlier runs that set `--max_span` below `-w` did not have that constraint applied.**
+- `eliminate_nested_dsrnas` rewritten as a sorted sliding-window sweep. It previously allocated ~7 pairwise `(n, n)` boolean matrices per chromosome-strand group (250 GB per matrix at n = 500k) and OOM'd on dense scans. Now O(n) memory with no pairwise matrices; ~110x faster at n = 10k, and 200k structures process in ~1.2s.
+- Nested elimination writeback no longer calls `index.get_loc()` per row (was O(n^2) on a non-unique index); uses an O(1) positional map.
+- Nested elimination logs a warning on pathologically dense loci (max comparison window > 5000) suggesting `--no-eliminate-nested`.
+
+### Notes
+- `--start`/`--end` verified to produce correct genomic coordinates on both strands. Region scans are not bit-identical to full scans near region boundaries (fewer overlapping windows, and einverted arm boundaries can vary by ~1 nt with window framing). Pad regions by at least one window width and filter afterward.
+
 ## [0.5.3] - 2026-07-03
 
 ### Removed
