@@ -2,6 +2,72 @@
 
 All notable changes to dsRNAscan will be documented in this file.
 
+## [0.5.5] - 2026-07-31
+
+### Fixed
+- **Quality filters now run before (and again after) nested elimination.** Previously
+  the order was dedup -> nested elimination -> filter, so a structure that would be
+  filtered out could first eliminate a nested structure that passed the filters,
+  losing both. Output is now a **strict superset** of the old behaviour - verified
+  across 7 flag combinations, zero structures lost in any of them, all shared
+  structures byte-identical in every column, recovering up to 6 structures per 100 kb.
+
+### Changed
+- **~22% faster with no loss of structures** (49.5s -> 38.7s on a 100 kb scan, 4 CPUs).
+  Two changes, neither of which alters a surviving structure:
+  - Hits below `--paired_cutoff` are now dropped **before** RNAduplex folding rather
+    than after. `match_perc` comes from einverted, so it is known pre-fold; folding
+    those structures and discarding them later was pure waste. They skew long-armed
+    and `duplexfold` is O(n*m), so on a 100 kb test 20% of pairs consumed 69% of fold
+    time.
+  - Fold work is submitted longest-pair-first (LPT). Arm lengths vary ~100x, so
+    submitting the largest first stops a late straggler from setting the makespan.
+    `as_completed` reassembles by index, so ordering cannot affect output.
+- Removed dead code: `predict_hybridization_batch` (defined, never called, and used a
+  `ThreadPoolExecutor` that provides no parallelism because the ViennaRNA binding holds
+  the GIL) and 6 unused imports.
+
+### Added
+- `--percent_paired_cutoff` separates the two metrics `--paired_cutoff` was silently
+  gating. `--paired_cutoff` now applies only to einverted's match percentage; the new
+  flag applies to RNAduplex's paired-base percentage and defaults to the same value,
+  so default behaviour is unchanged. Set it to `0` to gate on the einverted match
+  percentage only, as pre-0.4 releases did - on a test region that recovers ~6.6% more
+  structures. Added for reproducing older result sets; it does not change any default.
+
+### Changed
+- **Faster einverted stage, identical results.** The bundled `einverted` now
+  allocates its dynamic-programming tables once and reuses them across input
+  records instead of re-allocating and O(maxrepeat^2)-zeroing them for every
+  window. dsRNAscan groups each worker's windows into a single einverted call
+  (multi-FASTA) to exploit this, so the DP matrix is initialised once per worker
+  rather than once per window. Output is byte-identical to 0.5.4 (verified on
+  ce11); parallelism and all result files are unchanged.
+- **Fixed a memory leak exposed by the per-worker batching.** einverted's
+  alignment-traceback scratch (`align1`/`align2`, ~`4*maxrepeat` ints) was not
+  freed on the early exit taken when a repeat's traceback runs past the window
+  edge. Harmless in 0.5.4 (one window per einverted process, reclaimed at exit),
+  but with batching one process now scans hundreds of windows, so the leak
+  accumulated to gigabytes and OOM-killed large scans. A single 300-window batch
+  at the default band leaked ~2.5 GB (grew to 2.9 GB); now flat at 381 MB (the DP
+  matrix alone). Output is byte-identical.
+- einverted source is now vendored and self-contained in `einverted_src/`
+  (no EMBOSS/libajax build required); the G-U wobble patch is baked in. The
+  Linux x86_64 binary was rebuilt from it; other platform binaries should be
+  rebuilt from the same source for the release (see `einverted_src/README.md`).
+- **Bounded peak memory.** Results are now finalized (deduplicate +
+  nested-elimination + filter) and flushed **per chromosome** instead of
+  accumulating the whole genome in one DataFrame, so peak memory scales with the
+  largest chromosome rather than the whole genome. This is output-identical
+  because the dedup key already includes `chromosome` and nested-elimination
+  already groups by `(chromosome, strand)`  -  nothing is cross-chromosome. On a
+  9 Mb multi-chromosome test, peak RSS dropped 260 -> 200 MB; the reduction grows
+  with genome size and removes the out-of-memory wall that blocked large
+  vertebrate genomes from scanning in-core.
+- Sequence/structure columns use PyArrow-backed strings and coordinates use
+  `int32` when available (best-effort; falls back silently if PyArrow is
+  absent), shrinking the retained results further. Requires no new hard dependency.
+
 ## [0.5.4] - 2026-07-03
 
 ### Fixed

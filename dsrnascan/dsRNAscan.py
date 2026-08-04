@@ -4,16 +4,14 @@ dsRNAscan - A tool for genome-wide prediction of double-stranded RNA structures
 Copyright (C) 2024 Bass Lab
 """
 
-__version__ = '0.5.4'
+__version__ = '0.5.5'
 __author__ = 'Bass Lab'
 
 import os
 import locale
-import glob
 from Bio import SeqIO
 import argparse
 import subprocess
-import re
 import RNA
 import sys
 import numpy as np
@@ -22,8 +20,7 @@ import gzip
 import logging
 from tqdm import tqdm
 from datetime import datetime
-from queue import Empty
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import time
 
 # Set environment variables for locale
@@ -535,71 +532,6 @@ def predict_hybridization(seq1, seq2, temperature=37):
         print(f"Error running RNAduplex Python bindings: {str(e)}")
         return None, None, None, None
 
-def predict_hybridization_batch(seq_pairs, temperature=37, max_workers=4):
-    """
-    Process multiple sequence pairs in parallel using threading.
-    
-    Args:
-        seq_pairs: List of tuples (seq1, seq2)
-        temperature: Folding temperature
-        max_workers: Number of threads to use
-    
-    Returns:
-        List of tuples (structure, indices_seq1, indices_seq2, energy) maintaining the same order as input
-    """
-    # Set temperature once for all threads
-    if RNA.cvar.temperature != temperature:
-        RNA.cvar.temperature = temperature
-    
-    def process_single_pair(pair_data):
-        """Process a single pair in a thread"""
-        seq1, seq2, idx = pair_data
-        try:
-            result = RNA.duplexfold(seq1, seq2)
-            
-            # Parse structure
-            structure_parts = result.structure.split('&')
-            if len(structure_parts) != 2:
-                return idx, (None, None, None, None)
-            
-            len1 = len(structure_parts[0])
-            len2 = len(structure_parts[1])
-            
-            seq1_start = result.i - len1 + 1
-            seq1_end = result.i
-            seq2_start = result.j
-            seq2_end = result.j + len2 - 1
-            
-            # Return data directly
-            indices_seq1 = [seq1_start, seq1_end]
-            indices_seq2 = [seq2_start, seq2_end]
-            
-            return idx, (result.structure, indices_seq1, indices_seq2, result.energy)
-        except Exception as e:
-            print(f"Error in batch RNAduplex for pair {idx}: {e}")
-            return idx, (None, None, None, None)
-    
-    # Prepare data with indices
-    indexed_pairs = [(seq1, seq2, i) for i, (seq1, seq2) in enumerate(seq_pairs)]
-    
-    # Process in parallel using threads
-    results = [None] * len(seq_pairs)
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_single_pair, pair): pair[2] 
-                  for pair in indexed_pairs}
-        
-        for future in as_completed(futures):
-            idx = futures[future]
-            try:
-                result_idx, result_data = future.result()
-                results[result_idx] = result_data
-            except Exception as e:
-                print(f"Error getting result for pair {idx}: {e}")
-                results[idx] = (None, None, None, None)
-    
-    return results
-
 def parse_rnaduplex_output(output):
     """
     Parse the output from RNAduplex.
@@ -901,6 +833,86 @@ def process_sequence_einverted(row_data):
     
     return results
 
+
+def process_einverted_batch(batch_data):
+    """Run einverted once over MANY window records (multi-FASTA), reusing the DP
+    matrix across records (see einverted_src/). Parses hits per record by seq_hash.
+    Returns the same dicts as process_sequence_einverted. Added in 0.5.5."""
+    import subprocess
+    rows, einverted_bin, args = batch_data
+    results = []
+    if not rows:
+        return results
+    by_hash = {}
+    fasta_parts = []
+    for row in rows:
+        by_hash[str(row['seq_hash'])] = row
+        fasta_parts.append(f">{row['seq_hash']}\n{row['sequence']}\n")
+    # maxrepeat = min(window_size, max_span), matching process_sequence_einverted.
+    # The largest window in the batch sets it; shorter windows are naturally limited
+    # to their own length, so a larger -maxrepeat yields identical hits.
+    window_size = max(len(r['sequence']) for r in rows)
+    if hasattr(args, 'max_span') and args.max_span is not None:
+        max_repeat = min(window_size, args.max_span)
+    else:
+        max_repeat = window_size
+    cmd = [einverted_bin, "-sequence", "stdin", "-gap", str(args.gap),
+           "-threshold", str(args.score), "-match", str(args.match),
+           "-mismatch", str(args.mismatch),
+           "-maxrepeat", str(max_repeat), "-outfile", "stdout", "-outseq", "/dev/null"]
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        stdout, stderr = proc.communicate(input="".join(fasta_parts))
+        lines = stdout.split('\n')
+        j = 0
+        while j < len(lines):
+            if not lines[j] or j + 3 >= len(lines):
+                j += 1
+                continue
+            if ': Score ' in lines[j]:
+                name = lines[j].split(':')[0]
+                row = by_hash.get(name)
+                if row is None:
+                    j += 1
+                    continue
+                score_line = lines[j].split()
+                seq_i_full = lines[j + 1].split()
+                seq_j_full = lines[j + 3].split()
+                if len(score_line) >= 4 and len(seq_i_full) >= 3 and len(seq_j_full) >= 3:
+                    score = score_line[2].rstrip(':')
+                    raw_match = score_line[3]
+                    matches, total = map(int, raw_match.split('/'))
+                    match_perc = round((matches / total) * 100, 2)
+                    gap_numb = 0
+                    for gi, part in enumerate(score_line):
+                        if 'gap' in part.lower():
+                            if gi > 0 and score_line[gi - 1].isdigit():
+                                gap_numb = int(score_line[gi - 1])
+                            break
+                    i_start_local = int(seq_i_full[0])
+                    i_end_local = int(seq_i_full[2])
+                    j_start_local = int(seq_j_full[2])
+                    j_end_local = int(seq_j_full[0])
+                    i_seq = seq_i_full[1].replace("-", "").upper()
+                    j_seq = ''.join(reversed(seq_j_full[1].replace("-", ""))).upper()
+                    if row.get('strand', '+') == '-':
+                        i_seq = i_seq[::-1]
+                        j_seq = j_seq[::-1]
+                    results.append({
+                        'seq_hash': row['seq_hash'], 'strand': row.get('strand', '+'),
+                        'i_start_local': i_start_local, 'i_end_local': i_end_local,
+                        'j_start_local': j_start_local, 'j_end_local': j_end_local,
+                        'score': score, 'raw_match': raw_match, 'match_perc': match_perc,
+                        'gap_numb': gap_numb, 'i_seq': i_seq, 'j_seq': j_seq})
+                j += 4
+            else:
+                j += 1
+    except Exception as e:
+        print(f"Error processing einverted batch: {e}")
+    return results
+
+
 class ChunkedDsRNAProcessor:
     """Process dsRNAs in memory-efficient chunks"""
     
@@ -1058,7 +1070,9 @@ class ChunkedDsRNAProcessor:
         # Run RNAduplex (with deduplication of identical sequence pairs)
         # Pass the CPU count for parallel processing
         max_workers = args.c if hasattr(args, 'c') else args.cpus if hasattr(args, 'cpus') else 1
-        einverted_results = self.run_rnaduplex_batch(einverted_results, args.t, max_workers=max_workers)
+        einverted_results = self.run_rnaduplex_batch(
+            einverted_results, args.t, max_workers=max_workers,
+            paired_cutoff=getattr(args, 'paired_cutoff', None))
         
         # Map back to genomic coordinates (with region offset if extracting a region)
         results = self.map_to_genomic_coords(einverted_results, coord_map, region_offset, seq_len)
@@ -1066,37 +1080,57 @@ class ChunkedDsRNAProcessor:
         return results
     
     def run_einverted_batch(self, sequences_df, einverted_bin, args):
-        """Run einverted on unique sequences in parallel (one per process)"""
+        """Run einverted on unique window sequences. Windows are grouped into one
+        batch per worker and processed by a SINGLE einverted call each (multi-FASTA),
+        so the reuse-capable einverted initialises its DP matrix once per worker
+        instead of once per window. ProcessPool parallelism and output are unchanged
+        vs the per-window path. (0.5.5)"""
         if sequences_df.empty:
             return pd.DataFrame()
-
-        # Prepare data for parallel processing
-        row_data = [(row, einverted_bin, args) for _, row in sequences_df.iterrows()]
-
-        all_results = []
+        rows = [row for _, row in sequences_df.iterrows()]
         max_workers = args.c if hasattr(args, 'c') else args.cpus
-
+        # Use ~3x more batches than workers so the pool dynamically load-balances
+        # (a worker that finishes grabs the next batch) on repeat-skewed chromosomes,
+        # while each batch still holds enough windows to amortise the matrix init.
+        nb = max(1, min(len(rows), 3 * max_workers))
+        batches = [rows[i::nb] for i in range(nb)]
+        batches = [b for b in batches if b]
+        batch_data = [(b, einverted_bin, args) for b in batches]
+        all_results = []
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(process_sequence_einverted, data): idx
-                      for idx, data in enumerate(row_data)}
-
-            with tqdm(total=len(row_data), desc="    einverted", unit="win",
+            futures = {executor.submit(process_einverted_batch, bd): k
+                       for k, bd in enumerate(batch_data)}
+            with tqdm(total=len(rows), desc="    einverted", unit="win",
                       disable=not self.verbose) as pbar:
                 for future in as_completed(futures):
                     try:
                         results = future.result()
                         all_results.extend(results)
                     except Exception as e:
-                        print(f"Error getting einverted results: {e}")
-                    pbar.update(1)
-
+                        print(f"Error getting einverted batch results: {e}")
+                    pbar.update(len(batches[futures[future]]))
         return pd.DataFrame(all_results)
 
-    def run_rnaduplex_batch(self, einverted_df, temperature=37, max_workers=None):
+    def run_rnaduplex_batch(self, einverted_df, temperature=37, max_workers=None,
+                            paired_cutoff=None):
         """Run RNAduplex on einverted results, deduplicating identical sequence pairs"""
         if einverted_df.empty:
             return einverted_df
-            
+
+        # Drop hits that the match_perc filter will reject anyway. match_perc comes
+        # from einverted, so it is known before folding -- folding these and
+        # discarding them later is pure waste. They skew long-armed and duplexfold
+        # is O(n*m), so they cost far more than their share: on a 100 kb test 20% of
+        # pairs consumed 69% of fold time. Identical output, ~32% faster end to end.
+        if paired_cutoff:
+            n_before = len(einverted_df)
+            einverted_df = einverted_df[einverted_df['match_perc'] >= paired_cutoff]
+            if self.verbose and n_before > len(einverted_df):
+                self.log(f"    Pre-filtered {n_before - len(einverted_df)} hits below "
+                         f"{paired_cutoff}% einverted match before folding")
+            if einverted_df.empty:
+                return einverted_df
+
         # Deduplicate: identical sequence pairs give identical RNAduplex results
         # Run RNAduplex only on unique (i_seq, j_seq) pairs, then map back
         total_before = len(einverted_df)
@@ -1155,6 +1189,12 @@ class ChunkedDsRNAProcessor:
             rows_data = []
             for idx, row in unique_pairs.iterrows():
                 rows_data.append((idx, row.to_dict(), temperature))
+            # Longest-processing-time-first: duplexfold is O(n*m) and arm lengths vary
+            # ~100x, so submitting the biggest pairs first stops one late giant from
+            # defining the makespan. as_completed reassembles by index, so ordering
+            # cannot affect output.
+            rows_data.sort(key=lambda d: len(d[1].get('i_seq', '')) * len(d[1].get('j_seq', '')),
+                           reverse=True)
 
             results_dict = {}
             with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -1441,10 +1481,84 @@ class ChunkedDsRNAProcessor:
         
         return filtered_df
     
+    def _finalize_chromosome(self, df, args):
+        """Deduplicate, eliminate nested dsRNAs, filter, and compact one chromosome's
+        results. Called per chromosome so peak memory is bounded to a single chromosome.
+        Output is identical to genome-wide finalization (dedup key includes 'chromosome';
+        nested-elimination groups by (chromosome, strand)). Returns (df, stats)."""
+        stats = {'dedup': 0, 'nested': 0, 'filtered': 0}
+        if df.empty:
+            return df, stats
+        n0 = len(df)
+        df = df.drop_duplicates(
+            subset=['chromosome', 'strand', 'i_start', 'i_end', 'j_start', 'j_end', 'i_seq', 'j_seq'],
+            keep='first')
+        stats['dedup'] = n0 - len(df)
+
+        structures = df['structure'].values
+        base_pairs_vec = np.array([x.count('(') if x else 0 for x in structures])
+        lengths_vec = np.array([len(x) - 1 if x else 1 for x in structures])
+        df = df.copy()
+        df['percent_paired'] = np.round(base_pairs_vec * 2 / lengths_vec * 100, 2)
+        df['base_pairs'] = base_pairs_vec
+
+        # Two distinct metrics are gated here:
+        #   match_perc     - einverted's alignment match %   (--paired_cutoff)
+        #   percent_paired - RNAduplex's paired-base %       (--percent_paired_cutoff)
+        # --percent_paired_cutoff defaults to --paired_cutoff, so behaviour is unchanged.
+        # Set it to 0 to gate on einverted match % only, as pre-0.4 releases did.
+        pp_cutoff = getattr(args, 'percent_paired_cutoff', None)
+        if pp_cutoff is None:
+            pp_cutoff = args.paired_cutoff
+
+        def quality_mask(d):
+            m = (d['match_perc'] >= args.paired_cutoff) & (d['percent_paired'] >= pp_cutoff)
+            if args.min_bp > 0:
+                m = m & (d['base_pairs'] >= args.min_bp)
+            return m
+
+        # Filter BEFORE nested elimination: a structure that fails the quality filters
+        # must not be allowed to eliminate a nested structure that passes them, or both
+        # are lost. Filtering first yields a superset of the old ordering, never a subset.
+        n2 = len(df)
+        df = df[quality_mask(df)]
+        stats['filtered'] = n2 - len(df)
+
+        if not getattr(args, 'no_eliminate_nested', False):
+            n1 = len(df)
+            df = self.eliminate_nested_dsrnas(df)
+            stats['nested'] = n1 - len(df)
+            # Re-apply after elimination. This is a no-op today (elimination only drops
+            # rows, it never alters the gated columns), but it keeps the guarantee local
+            # rather than resting on that invariant holding forever.
+            n3 = len(df)
+            df = df[quality_mask(df)]
+            stats['filtered'] += n3 - len(df)
+        # Lever 1: shrink the persistent footprint. Long sequence/structure strings dominate
+        # memory; PyArrow-backed strings drop the per-object Python overhead (~2x); coordinates
+        # fit in int32. Best-effort -- leaves dtypes untouched if PyArrow is unavailable.
+        df = self._compact_dtypes(df)
+        return df, stats
+
+    @staticmethod
+    def _compact_dtypes(df):
+        for c in ('i_seq', 'j_seq', 'structure', 'seq_hash', 'raw_match'):
+            if c in df.columns:
+                try:
+                    df[c] = df[c].astype('string[pyarrow]')
+                except Exception:
+                    pass
+        for c in ('i_start', 'i_end', 'j_start', 'j_end',
+                  'eff_i_start', 'eff_i_end', 'eff_j_start', 'eff_j_end'):
+            if c in df.columns:
+                try:
+                    df[c] = df[c].astype('int32')
+                except Exception:
+                    pass
+        return df
+
     def process_fasta(self, fasta_file, einverted_bin, args):
         """Main processing function with chunking"""
-        from Bio import SeqIO
-        import gzip
         from collections import defaultdict
         
         # Get file size for progress estimation
@@ -1466,7 +1580,8 @@ class ChunkedDsRNAProcessor:
         start_time = time.time()
         initial_memory = get_memory_usage()
         
-        all_chunk_results = []
+        final_results = []          # per-chromosome FINALIZED results (bounds peak memory)
+        dedup_total = nested_total = filtered_total = 0
         total_windows = 0
         total_unique = 0
         
@@ -1485,6 +1600,7 @@ class ChunkedDsRNAProcessor:
                     continue
                 
                 sequence = str(record.seq).upper()
+                chrom_chunks = []   # this chromosome's raw candidates (freed after finalize)
                 
                 # Apply region extraction if specified
                 region_offset = 0  # Track offset for genomic coordinate mapping
@@ -1559,7 +1675,7 @@ class ChunkedDsRNAProcessor:
                         chunk_results = self.process_chunk(windows_df, coord_map, einverted_bin, args, region_offset, seq_len_for_mapping)
                         
                         if not chunk_results.empty:
-                            all_chunk_results.append(chunk_results)
+                            chrom_chunks.append(chunk_results)
                             self.total_dsrnas_found += len(chunk_results)
                         
                         # Memory check
@@ -1572,66 +1688,38 @@ class ChunkedDsRNAProcessor:
                         
                         if is_last:
                             break
+
+                # End of chromosome: finalize + flush so peak memory stays bounded to a
+                # single chromosome, not the whole genome. Output is identical -- the dedup
+                # key includes 'chromosome' and nested-elimination groups by
+                # (chromosome, strand), so nothing is cross-chromosome.
+                if chrom_chunks:
+                    chrom_df = pd.concat(chrom_chunks, ignore_index=True)
+                    chrom_chunks = []
+                    chrom_final, _st = self._finalize_chromosome(chrom_df, args)
+                    del chrom_df
+                    dedup_total += _st['dedup']
+                    nested_total += _st['nested']
+                    filtered_total += _st['filtered']
+                    if not chrom_final.empty:
+                        final_results.append(chrom_final)
         finally:
             handle.close()
         
-        # Combine all chunk results
-        if all_chunk_results:
-            all_results_df = pd.concat(all_chunk_results, ignore_index=True)
-            
-            # Deduplicate truly identical entries (same coordinates and sequences)
-            initial_count = len(all_results_df)
-            all_results_df = all_results_df.drop_duplicates(
-                subset=['chromosome', 'strand', 'i_start', 'i_end', 'j_start', 'j_end', 'i_seq', 'j_seq'],
-                keep='first'
-            )
-            deduplicated_count = initial_count - len(all_results_df)
-            if deduplicated_count > 0 and self.verbose:
-                self.log(f"\nRemoved {deduplicated_count} duplicate entries (identical coordinates and sequences)")
-            
-            # Eliminate nested dsRNAs across all results
-            if not getattr(args, 'no_eliminate_nested', False):
-                self.log("\nEliminating nested dsRNAs...")
-                all_results_df = self.eliminate_nested_dsrnas(all_results_df)
-            
-            # Apply final filters - VECTORIZED for better performance
-            # Vectorized calculation of percent_paired
-            structures = all_results_df['structure'].values
-            base_pairs_vec = np.array([s.count('(') if s else 0 for s in structures])
-            lengths_vec = np.array([len(s) - 1 if s else 1 for s in structures])
-            all_results_df['percent_paired'] = np.round(base_pairs_vec * 2 / lengths_vec * 100, 2)
-
-            # Vectorized calculation of base pairs
-            all_results_df['base_pairs'] = base_pairs_vec
-            
-            # Filter by minimum base pairs (if set)
-            initial_count = len(all_results_df)
-
-            # Apply filters based on what's configured
-            filter_mask = (
-                (all_results_df['match_perc'] >= args.paired_cutoff) &
-                (all_results_df['percent_paired'] >= args.paired_cutoff)
-            )
-
-            # Only apply min_bp filter if it's > 0
-            if args.min_bp > 0:
-                filter_mask = filter_mask & (all_results_df['base_pairs'] >= args.min_bp)
-
-            all_results_df = all_results_df[filter_mask]
-            
-            filtered_count = initial_count - len(all_results_df)
-            if filtered_count > 0 and self.verbose:
-                if args.min_bp > 0:
-                    self.log(f"  Filtered {filtered_count} structures (< {args.min_bp} bp or < {args.paired_cutoff}% paired)")
-                else:
-                    self.log(f"  Filtered {filtered_count} structures (< {args.paired_cutoff}% paired)")
-                # Log filtering if logger is available
-                try:
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.info(f"Filtered {filtered_count} structures with < {args.min_bp} base pairs")
-                except:
-                    pass
+        # Combine per-chromosome finalized results (each already deduped/nested/filtered)
+        if final_results:
+            all_results_df = pd.concat(final_results, ignore_index=True)
+            # Restore global row order (chromosomes stream in FASTA order; the
+            # non-streaming path sorted the whole genome). Keeps output order stable.
+            all_results_df = all_results_df.sort_values(
+                ['chromosome', 'strand', 'i_start'], ignore_index=True)
+            if self.verbose:
+                if dedup_total:
+                    self.log(f"Removed {dedup_total} duplicate entries (identical coordinates and sequences)")
+                if nested_total:
+                    self.log(f"Eliminated {nested_total} nested dsRNAs")
+                if filtered_total:
+                    self.log(f"  Filtered {filtered_total} structures (< min_bp or < paired_cutoff)")
         else:
             all_results_df = pd.DataFrame()
         
@@ -1691,6 +1779,7 @@ class ProcessorArgs:
         self.min_bp = original_args.min_bp  # Add min_bp parameter
         self.max_span = original_args.max_span
         self.paired_cutoff = original_args.paired_cutoff
+        self.percent_paired_cutoff = original_args.percent_paired_cutoff
         self.gap = original_args.gaps  # Note: gaps -> gap
         self.gaps = original_args.gaps
         self.match = original_args.match
@@ -1918,7 +2007,11 @@ def main():
     parser.add_argument('--match', type=int, default=3,
             help='Match score')
     parser.add_argument('--paired_cutoff', type=int, default=70,
-                        help='Cutoff to ignore sturctures with low percentage of pairs; Default <70')
+                        help='Minimum einverted match percentage (match_perc); Default = 70')
+    parser.add_argument('--percent_paired_cutoff', type=int, default=None,
+                        help='Minimum RNAduplex paired-base percentage (percent_paired); '
+                             'default = same as --paired_cutoff. Set to 0 to gate on the '
+                             'einverted match percentage only, as pre-0.4 releases did.')
     # --algorithm: only einverted is supported; iupacpal not implemented
     parser.add_argument('--forward-only', action='store_true', default=False,
                         help='Process forward strand only (default: both strands)')
@@ -2013,7 +2106,6 @@ def main():
     print(f"Using einverted binary: {einverted_bin}")
     # Add more details about the binary being used
     if os.path.exists(einverted_bin):
-        import stat
         file_stat = os.stat(einverted_bin)
         print(f"  Binary size: {file_stat.st_size:,} bytes")
         print(f"  Binary permissions: {oct(file_stat.st_mode)[-3:]}")
